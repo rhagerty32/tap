@@ -6,11 +6,11 @@ mod peer;
 mod protocol;
 mod settings;
 
+use crate::peer::{PeerInfo, PeerRecord};
 use discovery::peer_list_from_map;
-use network::{resolve_hold_addrs, NetworkRuntime, stable_sender_id};
+use network::{resolve_hold_addrs, stable_sender_id, NetworkRuntime};
 use overlay_state::OverlayStateMachine;
 use parking_lot::Mutex;
-use crate::peer::{PeerInfo, PeerRecord};
 use settings::{generate_team_key, load_settings, save_settings, settings_path, Settings};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -32,7 +32,11 @@ fn get_settings(state: State<AppState>) -> Settings {
 }
 
 #[tauri::command]
-fn save_app_settings(state: State<AppState>, settings: Settings, app: AppHandle) -> Result<(), String> {
+fn save_app_settings(
+    state: State<AppState>,
+    settings: Settings,
+    app: AppHandle,
+) -> Result<(), String> {
     save_settings(&settings)?;
     *state.settings.lock() = settings.clone();
     configure_autostart(&app, settings.launch_at_login)?;
@@ -102,6 +106,19 @@ fn show_popover(app: &AppHandle) {
     }
 }
 
+/// Menu-bar / tray image.
+///
+/// On macOS the status item is drawn at 18pt from the 36px template (`@2x`),
+/// black on transparent, with `icon_as_template` so it tracks the menu bar.
+/// Other desktops get the color tile, which stays readable on light and dark panels.
+fn tray_icon() -> tauri::image::Image<'static> {
+    #[cfg(target_os = "macos")]
+    const BYTES: &[u8] = include_bytes!("../icons/tray-icon@2x.png");
+    #[cfg(not(target_os = "macos"))]
+    const BYTES: &[u8] = include_bytes!("../icons/tray-icon-linux.png");
+    tauri::image::Image::from_bytes(BYTES).expect("failed to load tray icon")
+}
+
 fn center_popover(app: &AppHandle, window: &WebviewWindow) {
     if let Ok(Some(monitor)) = app.primary_monitor() {
         let size = window.outer_size().unwrap_or_default();
@@ -150,10 +167,15 @@ pub fn run() {
             let show = MenuItem::with_id(app, "show", "Open Tap", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &quit])?;
-            let _tray = TrayIconBuilder::new()
-                .icon(app.default_window_icon().unwrap().clone())
+            // macOS draws a template image at 18pt, so the 36px asset is the @2x.
+            // Linux panels do not recolor templates; use the color tile instead.
+            let tray = TrayIconBuilder::new()
+                .icon(tray_icon())
                 .menu(&menu)
-                .tooltip("Tap")
+                .tooltip("Tap");
+            #[cfg(target_os = "macos")]
+            let tray = tray.icon_as_template(true);
+            let _tray = tray
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => show_popover(app),
                     "quit" => app.exit(0),

@@ -30,7 +30,7 @@
       "csp": null
     },
     "trayIcon": {
-      "iconPath": "icons/icon.png",
+      "iconPath": "icons/tray-icon@2x.png",
       "iconAsTemplate": true
     }
   },
@@ -39,6 +39,7 @@
     "targets": ["appimage", "deb", "dmg"],
     "icon": [
       "icons/32x32.png",
+      "icons/64x64.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
