@@ -152,7 +152,8 @@ fn refresh_tray_icon(app: &AppHandle) {
 fn perform_alignment_haptic() {
     unsafe {
         use objc2::runtime::{AnyClass, AnyObject};
-        let Some(cls) = AnyClass::get(c"NSHapticFeedbackManager") else {
+        // objc2 0.5 looks classes up by name string. A c"..." literal is a CStr.
+        let Some(cls) = AnyClass::get("NSHapticFeedbackManager") else {
             return;
         };
         let performer: *mut AnyObject = objc2::msg_send![cls, defaultPerformer];
