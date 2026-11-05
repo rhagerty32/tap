@@ -1,0 +1,148 @@
+:root {
+  font-family: Inter, system-ui, -apple-system, sans-serif;
+  color: #e5e7eb;
+  background: transparent;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: rgba(17, 24, 39, 0.92);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+#app {
+  width: 360px;
+  min-height: 420px;
+  padding: 12px;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+h1 {
+  font-size: 16px;
+  margin: 0;
+}
+
+.tabs button {
+  background: #374151;
+  border: none;
+  color: #e5e7eb;
+  padding: 6px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.tabs button.active {
+  background: #2563eb;
+}
+
+.peer-list {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.peer-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  border: 1px solid #374151;
+  background: #1f2937;
+  color: inherit;
+  border-radius: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+  user-select: none;
+  touch-action: none;
+}
+
+.peer-row.holding {
+  border-color: #60a5fa;
+  box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.35);
+}
+
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #6b7280;
+}
+
+.dot.online {
+  background: #22c55e;
+}
+
+.peer-name {
+  flex: 1;
+  text-align: left;
+  font-weight: 600;
+}
+
+.hint {
+  font-size: 12px;
+  color: #9ca3af;
+  margin: 0 0 8px;
+}
+
+.settings {
+  display: none;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.settings.visible {
+  display: flex;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+}
+
+input[type="text"],
+input[type="password"],
+textarea {
+  border-radius: 8px;
+  border: 1px solid #374151;
+  background: #111827;
+  color: #e5e7eb;
+  padding: 8px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.save-btn {
+  margin-top: 8px;
+  background: #2563eb;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 10px;
+  cursor: pointer;
+}
+
+.status {
+  font-size: 12px;
+  color: #fbbf24;
+  min-height: 16px;
+}
