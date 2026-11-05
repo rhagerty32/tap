@@ -48,14 +48,22 @@ Install tray dependencies if needed: `libayatana-appindicator3-1`, `libwebkit2gt
 
 ## Team key & Tailscale setup
 
-1. Pick a shared secret (team key) and enter the **same value on every machine** in **Settings → Team key**.
+1. Open Tap. The first launch creates a **team key** and shows it on the Peers tab. Copy that same value into **Settings → Team key** on every other machine.
 2. Set a recognizable **Display name** on each machine.
 3. **Optional Tailscale:** install Tailscale on both machines, log into the same tailnet. Tap reads peers from `tailscale status --json`. You can add manual peers like `Alex@100.64.0.5` in Settings.
-4. Enable **Accept only Tailscale IPs** if you want to ignore non-tailnet senders on mixed networks.
+4. Enable **Accept only Tailscale IPs** if you want to ignore non-tailnet senders on mixed networks. Turn that off before using **Preview on this Mac**.
 
 Per-person **mute/allow** lists live in `~/.config/tap/settings.json` (`muteSenders` / `allowSenders` maps keyed by sender id) for v1.
 
-## Try it on two machines (Ryan)
+## Try it on this Mac
+
+1. Open Tap from the menu bar. The first launch opens the window for you.
+2. Press **Preview on this Mac**.
+3. The border and banner should show on your screens for a couple of seconds, then clear.
+
+That uses the real signed UDP path, sent to this machine. It does not check discovery between two computers.
+
+## Try it on two machines
 
 1. Build or install Tap on **Machine A** and **Machine B** (same team key).
 2. On both: open tray → **Settings** → set display names, team key, matching sender color optional → Save.
@@ -110,10 +118,10 @@ Artifacts land in `src-tauri/target/release/bundle/`.
 ## Tests
 
 ```bash
-cargo test --manifest-path src-tauri/Cargo.toml
+npm test
 ```
 
-Covers message signing/verification, replay rejection, and the 2s heartbeat timeout state machine.
+That runs `cargo test`. The suite covers message signing, replay rejection, the 2s heartbeat timeout, and a loopback preview: signed UDP start, heartbeats, and stop drive the overlay visible, then hidden. No window and no second machine.
 
 ## CI
 

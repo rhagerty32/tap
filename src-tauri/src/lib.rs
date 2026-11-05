@@ -11,13 +11,13 @@ use network::{resolve_hold_addrs, NetworkRuntime, stable_sender_id};
 use overlay_state::OverlayStateMachine;
 use parking_lot::Mutex;
 use crate::peer::{PeerInfo, PeerRecord};
-use settings::{load_settings, save_settings, Settings};
+use settings::{generate_team_key, load_settings, save_settings, settings_path, Settings};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, RunEvent, State, WebviewWindow,
+    AppHandle, Emitter, Manager, RunEvent, State, WebviewWindow, WindowEvent,
 };
 
 struct AppState {
@@ -70,6 +70,12 @@ fn hold_stop(state: State<AppState>) {
 }
 
 #[tauri::command]
+fn preview_local(state: State<AppState>) -> Result<(), String> {
+    let cfg = state.settings.lock().clone();
+    network::start_local_preview(&cfg)
+}
+
+#[tauri::command]
 fn sender_id(state: State<AppState>) -> String {
     let cfg = state.settings.lock().clone();
     stable_sender_id(&cfg.display_name)
@@ -109,7 +115,15 @@ fn center_popover(app: &AppHandle, window: &WebviewWindow) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let settings = Arc::new(Mutex::new(load_settings()));
+    let settings_file_existed = settings_path().exists();
+    let mut loaded = load_settings();
+    let mut open_setup = !settings_file_existed;
+    if loaded.team_key.trim().is_empty() {
+        loaded.team_key = generate_team_key();
+        let _ = save_settings(&loaded);
+        open_setup = true;
+    }
+    let settings = Arc::new(Mutex::new(loaded));
     let overlay = Arc::new(Mutex::new(OverlayStateMachine::default()));
     let peers = Arc::new(Mutex::new(HashMap::new()));
 
@@ -157,11 +171,19 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            if let Some(window) = app.get_webview_window("main") {
+            if open_setup {
+                show_popover(app.handle());
+            } else if let Some(window) = app.get_webview_window("main") {
                 let _ = window.hide();
             }
 
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
         })
         .invoke_handler(tauri::generate_handler![
             get_settings,
@@ -169,6 +191,7 @@ pub fn run() {
             list_peers,
             hold_start,
             hold_stop,
+            preview_local,
             sender_id,
         ])
         .build(tauri::generate_context!())

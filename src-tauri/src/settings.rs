@@ -2,9 +2,18 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use uuid::Uuid;
 
 pub const DEFAULT_PORT: u16 = 37561;
 pub const DEFAULT_COLOR: &str = "#3b82f6";
+
+fn default_port() -> u16 {
+    DEFAULT_PORT
+}
+
+pub fn generate_team_key() -> String {
+    Uuid::new_v4().simple().to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -19,6 +28,7 @@ pub struct Settings {
     pub manual_peers: Vec<String>,
     pub mute_senders: HashMap<String, bool>,
     pub allow_senders: HashMap<String, bool>,
+    #[serde(default = "default_port")]
     pub listen_port: u16,
 }
 

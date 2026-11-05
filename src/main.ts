@@ -17,15 +17,28 @@ type Settings = {
   launchAtLogin: boolean;
   tailnetOnly: boolean;
   manualPeers: string[];
+  listenPort: number;
 };
 
 let peers: Peer[] = [];
 let holding = false;
+let previewing = false;
 let activeTab: "peers" | "settings" = "peers";
+let currentSettings: Settings | null = null;
+let statusMessage = "";
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 
+function esc(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 function render() {
+  const teamKey = currentSettings?.teamKey ?? "";
   app.innerHTML = `
     <header>
       <h1>Tap</h1>
@@ -34,8 +47,22 @@ function render() {
         <button id="tab-settings" class="${activeTab === "settings" ? "active" : ""}">Settings</button>
       </div>
     </header>
-    <div id="status" class="status"></div>
+    <div id="status" class="status">${esc(statusMessage)}</div>
     <section id="peers-panel" style="display:${activeTab === "peers" ? "block" : "none"}">
+      <div class="try-card">
+        <div class="try-title">Try it on this Mac</div>
+        <p class="hint">No second computer needed. This flashes the border on your screens for a few seconds.</p>
+        <button id="preview-btn" class="save-btn" ${previewing ? "disabled" : ""}>${
+          previewing ? "Preview running…" : "Preview on this Mac"
+        }</button>
+        <label class="key-label">Team key
+          <div class="key-row">
+            <input id="team-key" type="text" readonly value="${esc(teamKey)}" />
+            <button id="copy-key" type="button">Copy</button>
+          </div>
+        </label>
+        <p class="hint">On another computer, install Tap and paste this same key in Settings.</p>
+      </div>
       <p class="hint">Press and hold a peer to signal their screen. Release to stop.</p>
       <ul class="peer-list" id="peer-list"></ul>
     </section>
@@ -48,18 +75,24 @@ function render() {
   };
   document.getElementById("tab-settings")!.onclick = () => {
     activeTab = "settings";
-    renderSettings();
+    render();
+  };
+  document.getElementById("preview-btn")!.onclick = () => {
+    void runPreview();
+  };
+  document.getElementById("copy-key")!.onclick = () => {
+    void copyTeamKey();
   };
 
   const list = document.getElementById("peer-list")!;
   if (peers.length === 0) {
-    list.innerHTML = `<li class="hint">No peers yet. Set the same team key on both machines and wait for discovery.</li>`;
+    list.innerHTML = `<li class="hint">No other machines yet. They show up here when they use this team key on the same network.</li>`;
   } else {
     for (const peer of peers) {
       const li = document.createElement("li");
       const btn = document.createElement("button");
       btn.className = `peer-row${holding ? " holding" : ""}`;
-      btn.innerHTML = `<span class="dot ${peer.online ? "online" : ""}"></span><span class="peer-name">${peer.name}</span><span>Hold</span>`;
+      btn.innerHTML = `<span class="dot ${peer.online ? "online" : ""}"></span><span class="peer-name">${esc(peer.name)}</span><span>Hold</span>`;
       bindHold(btn, peer.id);
       li.appendChild(btn);
       list.appendChild(li);
@@ -67,19 +100,28 @@ function render() {
   }
 
   if (activeTab === "settings") {
-    renderSettings();
+    void renderSettings();
   }
 }
 
 async function renderSettings() {
-  const settings = await invoke<Settings>("get_settings");
-  const panel = document.getElementById("settings-panel")!;
+  let settings: Settings;
+  try {
+    settings = currentSettings ?? (await invoke<Settings>("get_settings"));
+  } catch (e) {
+    setStatus(formatErr(e));
+    return;
+  }
+  currentSettings = settings;
+  const panel = document.getElementById("settings-panel");
+  if (!panel) return;
   panel.innerHTML = `
-    <label>Display name<input id="displayName" type="text" value="${settings.displayName}" /></label>
-    <label>Your signal color<input id="senderColor" type="text" value="${settings.senderColor}" /></label>
-    <label>Team key (shared secret)<input id="teamKey" type="password" value="${settings.teamKey}" placeholder="same on every teammate" /></label>
+    <label>Display name<input id="displayName" type="text" value="${esc(settings.displayName)}" /></label>
+    <label>Your signal color<input id="senderColor" type="text" value="${esc(settings.senderColor)}" /></label>
+    <label>Team key<input id="teamKey" type="text" value="${esc(settings.teamKey)}" /></label>
+    <p class="hint">Already filled in. Use the same value on every machine.</p>
     <label>Manual peers (one per line, name@host or host)
-      <textarea id="manualPeers" rows="3">${settings.manualPeers.join("\n")}</textarea>
+      <textarea id="manualPeers" rows="3">${esc(settings.manualPeers.join("\n"))}</textarea>
     </label>
     <label class="row"><input id="tailnetOnly" type="checkbox" ${settings.tailnetOnly ? "checked" : ""}/> Accept only Tailscale IPs (100.64.0.0/10)</label>
     <label class="row"><input id="doNotDisturb" type="checkbox" ${settings.doNotDisturb ? "checked" : ""}/> Do Not Disturb</label>
@@ -100,10 +142,50 @@ async function renderSettings() {
       doNotDisturb: (document.getElementById("doNotDisturb") as HTMLInputElement).checked,
       chimeEnabled: (document.getElementById("chimeEnabled") as HTMLInputElement).checked,
       launchAtLogin: (document.getElementById("launchAtLogin") as HTMLInputElement).checked,
+      listenPort: settings.listenPort,
     };
-    await invoke("save_app_settings", { settings: next });
-    setStatus("Settings saved.");
+    try {
+      await invoke("save_app_settings", { settings: next });
+      currentSettings = next;
+      setStatus("Settings saved.");
+    } catch (e) {
+      setStatus(formatErr(e));
+    }
   };
+}
+
+async function runPreview() {
+  if (previewing) return;
+  previewing = true;
+  render();
+  try {
+    await invoke("preview_local");
+    setStatus("Look at your screens. The border stays up for a couple of seconds.");
+  } catch (e) {
+    previewing = false;
+    setStatus(formatErr(e));
+    render();
+    return;
+  }
+  window.setTimeout(() => {
+    previewing = false;
+    setStatus("Preview finished.");
+    render();
+  }, 2600);
+}
+
+async function copyTeamKey() {
+  const key = currentSettings?.teamKey ?? "";
+  if (!key) {
+    setStatus("No team key yet.");
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(key);
+    setStatus("Team key copied.");
+  } catch {
+    setStatus("Select the team key and copy it.");
+  }
 }
 
 function bindHold(el: HTMLElement, peerId: string) {
@@ -115,7 +197,7 @@ function bindHold(el: HTMLElement, peerId: string) {
       holding = true;
       render();
     } catch (e) {
-      setStatus(String(e));
+      setStatus(formatErr(e));
     }
   };
   const stop = async () => {
@@ -131,19 +213,32 @@ function bindHold(el: HTMLElement, peerId: string) {
 }
 
 function setStatus(msg: string) {
+  statusMessage = msg;
   const el = document.getElementById("status");
   if (el) el.textContent = msg;
 }
 
-async function refreshPeers() {
-  peers = await invoke<Peer[]>("list_peers");
+function formatErr(e: unknown): string {
+  if (typeof e === "string") return e;
+  if (e && typeof e === "object" && "message" in e) {
+    return String((e as { message: unknown }).message);
+  }
+  return String(e);
+}
+
+void listen<Peer[]>("peers-updated", (event) => {
+  peers = event.payload;
+  render();
+}).catch(() => {});
+
+async function boot() {
+  try {
+    currentSettings = await invoke<Settings>("get_settings");
+    peers = await invoke<Peer[]>("list_peers");
+  } catch (e) {
+    statusMessage = formatErr(e);
+  }
   render();
 }
 
-listen<Peer[]>("peers-updated", (event) => {
-  peers = event.payload;
-  render();
-});
-
-refreshPeers();
-render();
+void boot();

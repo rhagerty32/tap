@@ -141,6 +141,73 @@ fn spawn_receiver(
     });
 }
 
+#[derive(Debug)]
+enum InboundEffect {
+    Ignored,
+    PeersChanged,
+    OverlayChanged(OverlaySnapshot),
+}
+
+fn apply_inbound(
+    cfg: &Settings,
+    overlay: &mut OverlayStateMachine,
+    peers: &mut HashMap<String, PeerRecord>,
+    replay: &mut ReplayGuard,
+    msg: TapMessage,
+    src_ip: IpAddr,
+) -> InboundEffect {
+    if cfg.tailnet_only && !is_tailnet_ip(&src_ip) {
+        return InboundEffect::Ignored;
+    }
+    let Some(key) = team_key_bytes(cfg) else {
+        return InboundEffect::Ignored;
+    };
+    if verify_message(&key, &msg, replay).is_err() {
+        return InboundEffect::Ignored;
+    }
+
+    if cfg.do_not_disturb && matches!(msg.kind, MessageKind::Start | MessageKind::Heartbeat) {
+        return InboundEffect::Ignored;
+    }
+    if cfg.mute_senders.get(&msg.sender_id).copied().unwrap_or(false) {
+        return InboundEffect::Ignored;
+    }
+    if cfg.allow_senders.values().any(|v| *v)
+        && !cfg.allow_senders.get(&msg.sender_id).copied().unwrap_or(false)
+    {
+        return InboundEffect::Ignored;
+    }
+
+    match msg.kind {
+        MessageKind::Presence => {
+            *peers = merge_peer_maps(
+                peers.clone(),
+                vec![PeerRecord {
+                    id: msg.sender_id.clone(),
+                    name: msg.sender_name.clone(),
+                    addrs: vec![SocketAddr::new(src_ip, cfg.listen_port)],
+                    source: PeerSource::Mdns,
+                    last_seen: Instant::now(),
+                }],
+            );
+            InboundEffect::PeersChanged
+        }
+        MessageKind::Start => {
+            let color = msg.color.unwrap_or_else(|| cfg.sender_color.clone());
+            overlay.apply_start(msg.sender_id, msg.sender_name, color);
+            InboundEffect::OverlayChanged(overlay.snapshot())
+        }
+        MessageKind::Heartbeat => {
+            overlay.apply_heartbeat(&msg.sender_id);
+            InboundEffect::Ignored
+        }
+        MessageKind::Stop => {
+            overlay.apply_stop(&msg.sender_id);
+            InboundEffect::OverlayChanged(overlay.snapshot())
+        }
+    }
+}
+
 fn handle_inbound(
     app: &AppHandle,
     settings: &Arc<Mutex<Settings>>,
@@ -151,62 +218,60 @@ fn handle_inbound(
     src_ip: IpAddr,
 ) {
     let cfg = settings.lock().clone();
-    if cfg.tailnet_only && !is_tailnet_ip(&src_ip) {
-        return;
-    }
-    let Some(key) = team_key_bytes(&cfg) else {
-        return;
+    let effect = {
+        let mut overlay_guard = overlay.lock();
+        let mut peers_guard = peers.lock();
+        let mut replay_guard = replay.lock();
+        apply_inbound(
+            &cfg,
+            &mut overlay_guard,
+            &mut peers_guard,
+            &mut replay_guard,
+            msg,
+            src_ip,
+        )
     };
-    {
-        let mut guard = replay.lock();
-        if verify_message(&key, &msg, &mut guard).is_err() {
+    match effect {
+        InboundEffect::Ignored => {}
+        InboundEffect::PeersChanged => {
+            let list = peer_list_from_map(&peers.lock(), &cfg);
+            let _ = app.emit("peers-updated", list);
+        }
+        InboundEffect::OverlayChanged(snapshot) => emit_overlay(app, settings, snapshot),
+    }
+}
+
+pub(crate) fn start_local_preview(settings: &Settings) -> Result<(), String> {
+    if settings.do_not_disturb {
+        return Err("Turn off Do Not Disturb to preview on this Mac.".into());
+    }
+    if settings.tailnet_only {
+        return Err("Turn off Accept only Tailscale IPs to preview on this Mac.".into());
+    }
+    let key = team_key_bytes(settings).ok_or_else(|| "Set a team key in Settings first.".to_string())?;
+    let port = settings.listen_port;
+    let color = settings.sender_color.clone();
+    thread::spawn(move || {
+        let Ok(socket) = UdpSocket::bind("127.0.0.1:0") else {
             return;
-        }
-    }
-
-    if cfg.do_not_disturb && matches!(msg.kind, MessageKind::Start | MessageKind::Heartbeat) {
-        return;
-    }
-    if cfg.mute_senders.get(&msg.sender_id).copied().unwrap_or(false) {
-        return;
-    }
-    if cfg.allow_senders.values().any(|v| *v)
-        && !cfg.allow_senders.get(&msg.sender_id).copied().unwrap_or(false)
-    {
-        return;
-    }
-
-    match msg.kind {
-        MessageKind::Presence => {
-            let mut map = peers.lock();
-            *map = merge_peer_maps(
-                map.clone(),
-                vec![PeerRecord {
-                    id: msg.sender_id.clone(),
-                    name: msg.sender_name.clone(),
-                    addrs: vec![SocketAddr::new(src_ip, cfg.listen_port)],
-                    source: PeerSource::Mdns,
-                    last_seen: Instant::now(),
-                }],
-            );
-            let _ = app.emit("peers-updated", peer_list_from_map(&map, &cfg));
-        }
-        MessageKind::Start => {
-            let color = msg.color.unwrap_or_else(|| cfg.sender_color.clone());
-            {
-                let mut o = overlay.lock();
-                o.apply_start(msg.sender_id.clone(), msg.sender_name.clone(), color);
+        };
+        let dest = SocketAddr::from(([127, 0, 0, 1], port));
+        let send = |kind: MessageKind, packet_color: Option<String>| {
+            let mut msg = new_outgoing(kind, "local-preview", "Preview", packet_color);
+            sign_message(&key, &mut msg);
+            if let Ok(bytes) = serde_json::to_vec(&msg) {
+                let _ = socket.send_to(&bytes, dest);
             }
-            emit_overlay(app, settings, overlay.lock().snapshot());
+        };
+        send(MessageKind::Start, Some(color));
+        for _ in 0..4 {
+            thread::sleep(Duration::from_millis(400));
+            send(MessageKind::Heartbeat, None);
         }
-        MessageKind::Heartbeat => {
-            overlay.lock().apply_heartbeat(&msg.sender_id);
-        }
-        MessageKind::Stop => {
-            overlay.lock().apply_stop(&msg.sender_id);
-            emit_overlay(app, settings, overlay.lock().snapshot());
-        }
-    }
+        thread::sleep(Duration::from_millis(200));
+        send(MessageKind::Stop, None);
+    });
+    Ok(())
 }
 
 fn emit_overlay(app: &AppHandle, settings: &Arc<Mutex<Settings>>, snapshot: OverlaySnapshot) {
@@ -471,4 +536,131 @@ pub fn resolve_hold_addrs(
         .get(peer_id)
         .map(|p| p.addrs.clone())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    fn preview_settings(port: u16) -> Settings {
+        Settings {
+            team_key: "suite-key".into(),
+            listen_port: port,
+            sender_color: "#3b82f6".into(),
+            do_not_disturb: false,
+            tailnet_only: false,
+            ..Settings::default()
+        }
+    }
+
+    fn recv_message(socket: &UdpSocket) -> TapMessage {
+        let mut buf = [0u8; 4096];
+        let (len, _) = socket
+            .recv_from(&mut buf)
+            .expect("timed out waiting for a preview packet");
+        serde_json::from_slice(&buf[..len]).expect("preview packet was not JSON")
+    }
+
+    #[test]
+    fn local_preview_over_udp_shows_then_clears_overlay() {
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("bind preview receiver");
+        socket
+            .set_read_timeout(Some(Duration::from_secs(4)))
+            .expect("read timeout");
+        let port = socket.local_addr().expect("local addr").port();
+        let settings = preview_settings(port);
+        start_local_preview(&settings).expect("preview starts");
+
+        let mut overlay = OverlayStateMachine::default();
+        let mut peers = HashMap::new();
+        let mut replay = ReplayGuard::default();
+        let mut saw_start = false;
+        let deadline = Instant::now() + Duration::from_secs(4);
+        loop {
+            if Instant::now() > deadline {
+                panic!("preview did not send stop");
+            }
+            let msg = recv_message(&socket);
+            let effect = apply_inbound(
+                &settings,
+                &mut overlay,
+                &mut peers,
+                &mut replay,
+                msg.clone(),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            );
+            match msg.kind {
+                MessageKind::Start => {
+                    saw_start = true;
+                    assert!(matches!(
+                        effect,
+                        InboundEffect::OverlayChanged(OverlaySnapshot::Visible(_))
+                    ));
+                    assert!(matches!(overlay.snapshot(), OverlaySnapshot::Visible(_)));
+                }
+                MessageKind::Heartbeat => {
+                    assert!(saw_start);
+                    assert!(matches!(overlay.snapshot(), OverlaySnapshot::Visible(_)));
+                }
+                MessageKind::Stop => {
+                    assert!(saw_start);
+                    assert!(matches!(overlay.snapshot(), OverlaySnapshot::Hidden));
+                    break;
+                }
+                MessageKind::Presence => {}
+            }
+        }
+    }
+
+    #[test]
+    fn preview_refuses_dnd_and_tailnet_only() {
+        let mut settings = preview_settings(1);
+        settings.do_not_disturb = true;
+        assert!(start_local_preview(&settings).is_err());
+
+        settings.do_not_disturb = false;
+        settings.tailnet_only = true;
+        assert!(start_local_preview(&settings).is_err());
+    }
+
+    #[test]
+    fn bad_signature_and_missing_key_do_not_show_overlay() {
+        let settings = preview_settings(9);
+        let mut overlay = OverlayStateMachine::default();
+        let mut peers = HashMap::new();
+        let mut replay = ReplayGuard::default();
+        let mut msg = new_outgoing(
+            MessageKind::Start,
+            "alice",
+            "Alice",
+            Some("#ff5500".into()),
+        );
+        sign_message(b"other-key", &mut msg);
+        let effect = apply_inbound(
+            &settings,
+            &mut overlay,
+            &mut peers,
+            &mut replay,
+            msg,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        );
+        assert!(matches!(effect, InboundEffect::Ignored));
+        assert!(matches!(overlay.snapshot(), OverlaySnapshot::Hidden));
+
+        let mut unsigned = settings.clone();
+        unsigned.team_key.clear();
+        let mut msg = new_outgoing(MessageKind::Start, "alice", "Alice", None);
+        sign_message(b"suite-key", &mut msg);
+        let effect = apply_inbound(
+            &unsigned,
+            &mut overlay,
+            &mut peers,
+            &mut replay,
+            msg,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        );
+        assert!(matches!(effect, InboundEffect::Ignored));
+        assert!(matches!(overlay.snapshot(), OverlaySnapshot::Hidden));
+    }
 }

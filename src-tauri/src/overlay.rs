@@ -5,6 +5,16 @@ use tauri::{
 };
 
 pub fn sync_overlay_windows(app: &AppHandle, snapshot: &OverlaySnapshot) {
+    let app = app.clone();
+    let snapshot = snapshot.clone();
+    // AppKit window calls (setCollectionBehavior, show, hide) crash with
+    // "Must only be used from the main thread" if the UDP receiver invokes them.
+    let _ = app
+        .clone()
+        .run_on_main_thread(move || apply_overlay_windows(&app, &snapshot));
+}
+
+fn apply_overlay_windows(app: &AppHandle, snapshot: &OverlaySnapshot) {
     match snapshot {
         OverlaySnapshot::Hidden => hide_all(app),
         OverlaySnapshot::Visible(_) => {

@@ -13,12 +13,14 @@ body {
   background: rgba(17, 24, 39, 0.92);
   border-radius: 12px;
   overflow: hidden;
+  height: 100vh;
 }
 
 #app {
   width: 360px;
-  min-height: 420px;
+  height: 100%;
   padding: 12px;
+  overflow-y: auto;
 }
 
 header {
@@ -98,6 +100,49 @@ h1 {
   margin: 0 0 8px;
 }
 
+.try-card {
+  background: #1f2937;
+  border: 1px solid #374151;
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+
+.try-title {
+  font-size: 13px;
+  font-weight: 650;
+  margin-bottom: 4px;
+}
+
+.try-card .save-btn {
+  width: 100%;
+  margin-top: 0;
+  margin-bottom: 10px;
+}
+
+.key-label {
+  margin-bottom: 8px;
+}
+
+.key-row {
+  display: flex;
+  gap: 8px;
+}
+
+.key-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.key-row button {
+  background: #374151;
+  color: #e5e7eb;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+
 .settings {
   display: none;
   flex-direction: column;
@@ -139,6 +184,11 @@ textarea {
   border-radius: 8px;
   padding: 10px;
   cursor: pointer;
+}
+
+.save-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 .status {
