@@ -18,6 +18,8 @@ pub struct PeerInfo {
     pub addresses: Vec<String>,
     pub online: bool,
     pub source: PeerSource,
+    /// Seconds since this peer was last seen. The popover uses it for "Away".
+    pub seen_secs_ago: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -37,6 +39,7 @@ impl PeerRecord {
             addresses: self.addrs.iter().map(|a| a.to_string()).collect(),
             online,
             source: self.source,
+            seen_secs_ago: self.last_seen.elapsed().as_secs(),
         }
     }
 }

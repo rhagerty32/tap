@@ -16,9 +16,13 @@ pub fn sync_overlay_windows(app: &AppHandle, snapshot: &OverlaySnapshot) {
 
 fn apply_overlay_windows(app: &AppHandle, snapshot: &OverlaySnapshot) {
     match snapshot {
-        OverlaySnapshot::Hidden => hide_all(app),
+        OverlaySnapshot::Hidden => {
+            hide_all(app);
+            crate::set_tray_receiving(app, false);
+        }
         OverlaySnapshot::Visible(_) => {
             let payload = overlay_payload(snapshot.clone());
+            crate::set_tray_receiving(app, true);
             let monitors = app.available_monitors().unwrap_or_default();
             if monitors.is_empty() {
                 return;
@@ -56,10 +60,12 @@ fn apply_overlay_windows(app: &AppHandle, snapshot: &OverlaySnapshot) {
                     width: size.width,
                     height: size.height,
                 }));
+                let _ = window.show();
+                // Click-through asks GDK for the realized window. Doing it before show
+                // unwraps None inside tao and aborts the process, so the glow never appears.
                 let _ = window.set_ignore_cursor_events(true);
                 configure_macos_window(&window);
                 let _ = window.emit("overlay-changed", payload.clone());
-                let _ = window.show();
             }
             for idx in monitors.len()..8 {
                 if let Some(w) = app.get_webview_window(&format!("overlay-{idx}")) {
@@ -93,7 +99,8 @@ fn configure_macos_window(window: &tauri::WebviewWindow) {
             let _: () = msg_send![window_ptr, setCollectionBehavior: behavior];
             let _: () = msg_send![window_ptr, setIgnoresMouseEvents: true];
             let _: () = msg_send![window_ptr, setHasShadow: false];
-            let level: i32 = 25;
+            // NSScreenSaverWindowLevel, so the edge glow sits above normal windows.
+            let level: i32 = 1000;
             let _: () = msg_send![window_ptr, setLevel: level];
         }
     }

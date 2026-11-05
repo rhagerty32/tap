@@ -118,6 +118,20 @@ pub fn peer_list_from_map(map: &HashMap<String, PeerRecord>, settings: &Settings
         .collect()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manual_peer_keeps_explicit_port() {
+        let peers = manual_peer_records(&["Alex@127.0.0.1:37562".into()], 37561);
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].name, "Alex");
+        assert_eq!(peers[0].addrs[0].port(), 37562);
+        assert_eq!(peers[0].addrs[0].ip().to_string(), "127.0.0.1");
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct TailscaleStatus {
     #[serde(default)]

@@ -2,12 +2,15 @@ use std::time::{Duration, Instant};
 
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(500);
 pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(2);
+/// Receiver safety cutoff. Heartbeats keep the glow up, but never past a minute.
+pub const SAFETY_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveOverlay {
     pub sender_id: String,
     pub sender_name: String,
     pub color: String,
+    pub started: Instant,
     pub last_heartbeat: Instant,
 }
 
@@ -24,11 +27,13 @@ pub struct OverlayStateMachine {
 
 impl OverlayStateMachine {
     pub fn apply_start(&mut self, sender_id: String, sender_name: String, color: String) {
+        let now = Instant::now();
         self.active = Some(ActiveOverlay {
             sender_id,
             sender_name,
             color,
-            last_heartbeat: Instant::now(),
+            started: now,
+            last_heartbeat: now,
         });
     }
 
@@ -52,10 +57,12 @@ impl OverlayStateMachine {
     }
 
     pub fn tick(&mut self, now: Instant) {
-        if let Some(active) = &self.active {
-            if now.duration_since(active.last_heartbeat) > HEARTBEAT_TIMEOUT {
-                self.active = None;
-            }
+        let clear = self.active.as_ref().is_some_and(|active| {
+            now.saturating_duration_since(active.last_heartbeat) > HEARTBEAT_TIMEOUT
+                || now.saturating_duration_since(active.started) >= SAFETY_TIMEOUT
+        });
+        if clear {
+            self.active = None;
         }
     }
 
@@ -74,11 +81,7 @@ mod tests {
     #[test]
     fn clears_after_two_seconds_without_heartbeat() {
         let mut sm = OverlayStateMachine::default();
-        sm.apply_start(
-            "bob".into(),
-            "Bob".into(),
-            "#00ffaa".into(),
-        );
+        sm.apply_start("bob".into(), "Bob".into(), "#00ffaa".into());
         assert!(matches!(sm.snapshot(), OverlaySnapshot::Visible(_)));
 
         let t0 = Instant::now();
@@ -89,6 +92,18 @@ mod tests {
         assert!(matches!(sm.snapshot(), OverlaySnapshot::Visible(_)));
 
         sm.tick(t0 + Duration::from_millis(2001));
+        assert!(matches!(sm.snapshot(), OverlaySnapshot::Hidden));
+    }
+
+    #[test]
+    fn clears_after_sixty_seconds_even_with_fresh_heartbeats() {
+        let mut sm = OverlayStateMachine::default();
+        sm.apply_start("bob".into(), "Bob".into(), "#F86E51".into());
+        if let Some(active) = &mut sm.active {
+            active.started = Instant::now() - Duration::from_secs(61);
+            active.last_heartbeat = Instant::now();
+        }
+        sm.tick(Instant::now());
         assert!(matches!(sm.snapshot(), OverlaySnapshot::Hidden));
     }
 
