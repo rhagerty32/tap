@@ -16,14 +16,30 @@
       {
         "label": "main",
         "title": "Tap",
-        "width": 360,
-        "height": 560,
+        "width": 368,
+        "height": 440,
         "visible": false,
         "decorations": false,
         "transparent": true,
+        "shadow": false,
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "resizable": false
+      },
+      {
+        "label": "settings",
+        "title": "Settings",
+        "url": "settings.html",
+        "width": 360,
+        "height": 540,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "center": true
       }
     ],
     "security": {

@@ -16,9 +16,13 @@ pub fn sync_overlay_windows(app: &AppHandle, snapshot: &OverlaySnapshot) {
 
 fn apply_overlay_windows(app: &AppHandle, snapshot: &OverlaySnapshot) {
     match snapshot {
-        OverlaySnapshot::Hidden => hide_all(app),
+        OverlaySnapshot::Hidden => {
+            hide_all(app);
+            crate::set_tray_receiving(app, false);
+        }
         OverlaySnapshot::Visible(_) => {
             let payload = overlay_payload(snapshot.clone());
+            crate::set_tray_receiving(app, true);
             let monitors = app.available_monitors().unwrap_or_default();
             if monitors.is_empty() {
                 return;
@@ -93,7 +97,8 @@ fn configure_macos_window(window: &tauri::WebviewWindow) {
             let _: () = msg_send![window_ptr, setCollectionBehavior: behavior];
             let _: () = msg_send![window_ptr, setIgnoresMouseEvents: true];
             let _: () = msg_send![window_ptr, setHasShadow: false];
-            let level: i32 = 25;
+            // NSScreenSaverWindowLevel, so the edge glow sits above normal windows.
+            let level: i32 = 1000;
             let _: () = msg_send![window_ptr, setLevel: level];
         }
     }
