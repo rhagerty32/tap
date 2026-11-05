@@ -605,8 +605,13 @@ body.overlay-app.preview {
   position: absolute;
   inset: 0;
   opacity: 0;
+  background:
+    linear-gradient(to bottom, color-mix(in srgb, var(--glow, var(--coral)) 50%, transparent), transparent 90px),
+    linear-gradient(to top, color-mix(in srgb, var(--glow, var(--coral)) 42%, transparent), transparent 110px),
+    linear-gradient(to right, color-mix(in srgb, var(--glow, var(--coral)) 36%, transparent), transparent 100px),
+    linear-gradient(to left, color-mix(in srgb, var(--glow, var(--coral)) 36%, transparent), transparent 100px);
   box-shadow:
-    inset 0 0 0 3px color-mix(in srgb, var(--glow, var(--coral)) 55%, transparent),
+    inset 0 0 0 3px color-mix(in srgb, var(--glow, var(--coral)) 70%, transparent),
     inset 0 0 60px 10px color-mix(in srgb, var(--glow, var(--amber)) 45%, transparent),
     inset 0 0 160px 30px color-mix(in srgb, var(--glow, var(--coral)) 18%, transparent);
 }

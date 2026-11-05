@@ -166,11 +166,47 @@ fn perform_alignment_haptic() {
 }
 
 fn show_popover(app: &AppHandle, anchor: Option<&tauri::Rect>) {
+    if let Some(anchor) = anchor_from(app, anchor) {
+        if let Ok(mut slot) = POPOVER_ANCHOR.lock() {
+            *slot = Some(anchor);
+        }
+    }
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
+        let _ = window.unminimize();
+        position_popover(app, &window);
         let _ = window.set_focus();
-        position_popover(app, &window, anchor);
     }
+}
+
+#[derive(Clone, Copy)]
+struct AnchorPoint {
+    x: f64,
+    y: f64,
+}
+
+static POPOVER_ANCHOR: std::sync::Mutex<Option<AnchorPoint>> = std::sync::Mutex::new(None);
+
+fn anchor_from(app: &AppHandle, anchor: Option<&tauri::Rect>) -> Option<AnchorPoint> {
+    if let Some(rect) = anchor {
+        let scale = app
+            .get_webview_window("main")
+            .and_then(|window| window.scale_factor().ok())
+            .unwrap_or(1.0);
+        let pos = rect.position.to_physical::<f64>(scale);
+        let size = rect.size.to_physical::<f64>(scale);
+        return Some(AnchorPoint {
+            x: pos.x + size.width / 2.0,
+            y: pos.y + size.height,
+        });
+    }
+    if let Ok(cursor) = app.cursor_position() {
+        return Some(AnchorPoint {
+            x: cursor.x,
+            y: cursor.y,
+        });
+    }
+    None
 }
 
 /// Menu-bar / tray image.
@@ -186,43 +222,145 @@ fn tray_icon() -> tauri::image::Image<'static> {
     tauri::image::Image::from_bytes(BYTES).expect("failed to load tray icon")
 }
 
-fn position_popover(app: &AppHandle, window: &WebviewWindow, anchor: Option<&tauri::Rect>) {
-    let size = window.outer_size().unwrap_or_default();
-    let scale = window.scale_factor().unwrap_or(1.0);
-    let (mut x, mut y) = if let Some(rect) = anchor {
-        let pos = rect.position.to_physical::<f64>(scale);
-        let rect_size = rect.size.to_physical::<f64>(scale);
-        let cx = pos.x + rect_size.width / 2.0;
-        (cx - size.width as f64 / 2.0, pos.y + rect_size.height + 8.0)
-    } else if let Ok(cursor) = app.cursor_position() {
-        (cursor.x - size.width as f64 / 2.0, cursor.y + 12.0)
-    } else if let Ok(Some(monitor)) = app.primary_monitor() {
-        let mon_pos = monitor.position();
-        let mon_size = monitor.size();
-        (
-            mon_pos.x as f64 + (mon_size.width as f64 - size.width as f64) / 2.0,
-            mon_pos.y as f64 + (mon_size.height as f64 - size.height as f64) / 2.0,
-        )
-    } else {
+static POPOVER_REQUESTED: std::sync::Mutex<Option<(f64, f64)>> = std::sync::Mutex::new(None);
+
+fn position_popover(app: &AppHandle, window: &WebviewWindow) {
+    let anchor = match POPOVER_ANCHOR.lock() {
+        Ok(slot) => *slot,
+        Err(_) => None,
+    };
+    let Some(anchor) = anchor else {
         return;
     };
-
-    let probe_x = x + size.width as f64 / 2.0;
-    let probe_y = y + 8.0;
-    if let Ok(Some(monitor)) = app.monitor_from_point(probe_x, probe_y) {
-        let area = monitor.work_area();
-        let min_x = area.position.x as f64;
-        let min_y = area.position.y as f64;
-        let max_x = area.position.x as f64 + area.size.width as f64 - size.width as f64;
-        let max_y = area.position.y as f64 + area.size.height as f64 - size.height as f64;
-        x = x.clamp(min_x, max_x.max(min_x));
-        y = y.clamp(min_y, max_y.max(min_y));
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let outer = window.outer_size().unwrap_or_default();
+    let mut win_w = outer.width as f64;
+    let mut win_h = outer.height as f64;
+    if let Ok(guard) = POPOVER_REQUESTED.lock() {
+        if let Some((logical_w, logical_h)) = *guard {
+            win_w = win_w.max(logical_w * scale);
+            win_h = win_h.max(logical_h * scale);
+        }
     }
-
+    if win_w < 2.0 {
+        win_w = 368.0 * scale;
+    }
+    if win_h < 2.0 {
+        win_h = 440.0 * scale;
+    }
+    let Some((area_x, area_y, area_w, area_h)) = work_area_for_point(app, anchor.x, anchor.y) else {
+        return;
+    };
+    let (x, y) = place_popover(
+        anchor.x, anchor.y, win_w, win_h, area_x, area_y, area_w, area_h,
+    );
     let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
         x: x.round() as i32,
         y: y.round() as i32,
     }));
+}
+
+/// Place the popover just below the anchor, then keep the whole window inside the work area.
+fn place_popover(
+    anchor_x: f64,
+    anchor_y: f64,
+    win_w: f64,
+    win_h: f64,
+    area_x: f64,
+    area_y: f64,
+    area_w: f64,
+    area_h: f64,
+) -> (f64, f64) {
+    let max_x = (area_x + area_w - win_w).max(area_x);
+    let max_y = (area_y + area_h - win_h).max(area_y);
+    let x = anchor_x - win_w / 2.0;
+    let mut y = anchor_y + 8.0;
+    if y > max_y {
+        let above = anchor_y - win_h - 8.0;
+        if above >= area_y {
+            y = above;
+        }
+    }
+    (x.clamp(area_x, max_x), y.clamp(area_y, max_y))
+}
+
+fn work_area_for_point(app: &AppHandle, x: f64, y: f64) -> Option<(f64, f64, f64, f64)> {
+    let monitors = app.available_monitors().ok()?;
+    let chosen = monitors
+        .iter()
+        .find(|monitor| contains_point(monitor, x, y))
+        .or_else(|| monitors.first());
+    let monitor = chosen?;
+    let area = monitor.work_area();
+    if area.size.width > 0 && area.size.height > 0 {
+        Some((
+            area.position.x as f64,
+            area.position.y as f64,
+            area.size.width as f64,
+            area.size.height as f64,
+        ))
+    } else {
+        let origin = monitor.position();
+        let size = monitor.size();
+        Some((
+            origin.x as f64,
+            origin.y as f64,
+            size.width as f64,
+            size.height as f64,
+        ))
+    }
+}
+
+fn contains_point(monitor: &tauri::Monitor, x: f64, y: f64) -> bool {
+    let origin = monitor.position();
+    let size = monitor.size();
+    let left = origin.x as f64;
+    let top = origin.y as f64;
+    x >= left && y >= top && x < left + size.width as f64 && y < top + size.height as f64
+}
+
+#[tauri::command]
+fn reposition_popover(app: AppHandle, width: f64, height: f64) {
+    if let Ok(mut slot) = POPOVER_REQUESTED.lock() {
+        *slot = Some((width, height));
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        position_popover(&app, &window);
+    }
+}
+
+#[tauri::command]
+fn open_settings(app: AppHandle) -> Result<(), String> {
+    let Some(window) = app.get_webview_window("settings") else {
+        return Err("Settings window is not available.".into());
+    };
+    let outer = window.outer_size().unwrap_or_default();
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let win_w = if outer.width > 1 {
+        outer.width as f64
+    } else {
+        360.0 * scale
+    };
+    let win_h = if outer.height > 1 {
+        outer.height as f64
+    } else {
+        540.0 * scale
+    };
+    let cursor = app.cursor_position().unwrap_or(tauri::PhysicalPosition { x: win_w, y: win_h });
+    if let Some((area_x, area_y, area_w, area_h)) = work_area_for_point(&app, cursor.x, cursor.y) {
+        let max_x = (area_x + area_w - win_w).max(area_x);
+        let max_y = (area_y + area_h - win_h).max(area_y);
+        let x = (area_x + (area_w - win_w) / 2.0).clamp(area_x, max_x);
+        let y = (area_y + (area_h - win_h) / 2.0).clamp(area_y, max_y);
+        let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
+            x: x.round() as i32,
+            y: y.round() as i32,
+        }));
+    }
+    window.unminimize().map_err(|e| e.to_string())?;
+    window.show().map_err(|e| e.to_string())?;
+    window.set_focus().map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -316,6 +454,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_settings,
             save_app_settings,
+            open_settings,
+            reposition_popover,
             list_peers,
             hold_start,
             hold_stop,
@@ -331,4 +471,19 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod popover_placement_tests {
+    use super::place_popover;
+
+    #[test]
+    fn clamps_popover_inside_1920_work_area_when_opened_from_the_tray() {
+        // Panel occupies the top 29px. The tray click is near the right edge.
+        let (x, y) = place_popover(1888.0, 14.0, 368.0, 400.0, 0.0, 29.0, 1920.0, 1171.0);
+        assert!(x >= 0.0, "left {x}");
+        assert!(x + 368.0 <= 1920.0 + 0.01, "right {}", x + 368.0);
+        assert!(y >= 29.0, "top {y}");
+        assert!(y + 400.0 <= 29.0 + 1171.0 + 0.01, "bottom {}", y + 400.0);
+    }
 }

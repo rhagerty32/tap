@@ -166,12 +166,20 @@ async function boot() {
     error = typeof err === "string" ? err : "Couldn't load settings.";
   }
   render();
-  window.addEventListener("blur", () => {
-    void getCurrentWindow().hide().catch(() => {});
+  const current = getCurrentWindow();
+  let focusedAt = 0;
+  void current.onFocusChanged(({ payload: focused }) => {
+    if (focused) {
+      focusedAt = Date.now();
+      return;
+    }
+    // xfwm4 can blur a just-shown window before focus sticks. Ignore that race.
+    if (focusedAt === 0 || Date.now() - focusedAt < 700) return;
+    void current.hide().catch(() => {});
   });
   window.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && !adding) {
-      void getCurrentWindow().hide().catch(() => {});
+      void current.hide().catch(() => {});
     }
   });
 }

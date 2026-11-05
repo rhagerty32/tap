@@ -6,7 +6,6 @@ import "./styles.css";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
-import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 
 type Peer = {
   id: string;
@@ -119,8 +118,11 @@ function cardHeight(): number {
 
 async function fitWindow() {
   if (preview) return;
+  const width = 368;
+  const height = cardHeight() + 48;
   try {
-    await getCurrentWindow().setSize(new LogicalSize(368, cardHeight() + 48));
+    await getCurrentWindow().setSize(new LogicalSize(width, height));
+    await invoke("reposition_popover", { width, height });
   } catch {
     // Outside the Tauri window this is a plain page.
   }
@@ -251,9 +253,7 @@ async function endHold(peer: Peer) {
 
 async function openSettings() {
   try {
-    const settings = await WebviewWindow.getByLabel("settings");
-    await settings?.show();
-    await settings?.setFocus();
+    await invoke("open_settings");
   } catch (error) {
     statusMessage = formatErr(error);
     render();

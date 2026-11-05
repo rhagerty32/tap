@@ -60,10 +60,12 @@ fn apply_overlay_windows(app: &AppHandle, snapshot: &OverlaySnapshot) {
                     width: size.width,
                     height: size.height,
                 }));
+                let _ = window.show();
+                // Click-through asks GDK for the realized window. Doing it before show
+                // unwraps None inside tao and aborts the process, so the glow never appears.
                 let _ = window.set_ignore_cursor_events(true);
                 configure_macos_window(&window);
                 let _ = window.emit("overlay-changed", payload.clone());
-                let _ = window.show();
             }
             for idx in monitors.len()..8 {
                 if let Some(w) = app.get_webview_window(&format!("overlay-{idx}")) {

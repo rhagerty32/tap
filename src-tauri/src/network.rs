@@ -71,15 +71,9 @@ impl NetworkRuntime {
     }
 
     pub fn end_hold(&self) {
+        // Leave the addresses in place. The hold thread sends Stop on the next
+        // wake, then clears them. Clearing here raced that wake and dropped Stop.
         *self.hold_target.lock() = None;
-        // hold thread sends STOP using last known addrs, then clears them
-        thread::spawn({
-            let hold_addrs = self.hold_addrs.clone();
-            move || {
-                thread::sleep(Duration::from_millis(100));
-                hold_addrs.lock().clear();
-            }
-        });
     }
 }
 
@@ -110,16 +104,19 @@ fn spawn_receiver(
             loop {
                 match socket.recv_from(&mut buf) {
                     Ok((len, src)) => {
-                        if let Ok(msg) = serde_json::from_slice::<TapMessage>(&buf[..len]) {
-                            handle_inbound(
-                                &app,
-                                &settings,
-                                &overlay,
-                                &peers,
-                                &replay,
-                                msg,
-                                src.ip(),
-                            );
+                        match serde_json::from_slice::<TapMessage>(&buf[..len]) {
+                            Ok(msg) => {
+                                handle_inbound(
+                                    &app,
+                                    &settings,
+                                    &overlay,
+                                    &peers,
+                                    &replay,
+                                    msg,
+                                    src.ip(),
+                                );
+                            }
+                            Err(_) => {}
                         }
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
@@ -405,6 +402,7 @@ fn spawn_hold_sender(
                             }
                         }
                     }
+                    hold_addrs.lock().clear();
                 }
                 sent_start = false;
                 thread::sleep(Duration::from_millis(50));
@@ -504,12 +502,15 @@ fn spawn_tailscale_poll(
     thread::spawn(move || {
         while !stop.load(Ordering::SeqCst) {
             let cfg = settings.lock().clone();
-            let mut map = peers.lock();
             let ts = discover_tailscale_peers(cfg.listen_port);
             let manual = manual_peer_records(&cfg.manual_peers, cfg.listen_port);
-            *map = merge_peer_maps(map.clone(), ts);
-            *map = merge_peer_maps(map.clone(), manual);
-            let _ = app.emit("peers-updated", peer_list_from_map(&map, &cfg));
+            let list = {
+                let mut map = peers.lock();
+                *map = merge_peer_maps(map.clone(), ts);
+                *map = merge_peer_maps(map.clone(), manual);
+                peer_list_from_map(&map, &cfg)
+            };
+            let _ = app.emit("peers-updated", list);
             thread::sleep(Duration::from_secs(15));
         }
     });
