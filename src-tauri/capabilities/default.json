@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Main Tap capability",
+  "windows": ["main", "overlay-*"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:window:default",
+    "core:webview:default",
+    "core:tray:default",
+    "core:menu:default",
+    "opener:default",
+    "autostart:default"
+  ]
+}
