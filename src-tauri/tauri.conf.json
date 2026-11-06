@@ -86,6 +86,11 @@
     "longDescription": "Tap lets you press-and-hold a coworker's name to show a click-through screen overlay on their machine while you hold."
   },
   "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["tap"]
+      }
+    },
     "updater": {
       "requireSignedVersion": true,
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEE0MUM3M0Q4QUU5OTJDMUUKUldRZUxKbXUySE1jcElIYnhaMmVXV2l5SHBNdWJWWEhUZXJNTXBDVjZldHllOTlBeU8yWHlmTG4K",

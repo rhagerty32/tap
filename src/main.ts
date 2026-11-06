@@ -16,6 +16,7 @@ type Peer = {
   status?: string;
   avatarHash?: string;
   color?: string;
+  key?: string;
 };
 
 type Settings = {
@@ -53,6 +54,7 @@ const dndPeers = new Set<string>();
 let statusMessage = "";
 let armingId: string | null = null;
 let holdingId: string | null = null;
+let keyboardOpen = false;
 let safetyTimer = 0;
 let colorFor: string | null = null;
 let colorBefore: string | undefined;
@@ -176,9 +178,27 @@ function statusText(peer: Peer): string {
 }
 
 function hintText(peer: Peer): string {
-  if (!holdable(peer)) return "";
   if (holdingId === peer.id) return "Release to stop";
+  if (!holdable(peer)) return "";
   return "Hold to tap";
+}
+
+function peerForKey(key: string): Peer | undefined {
+  const letter = key.toLowerCase();
+  if (letter.length !== 1) return undefined;
+  return peers.find((peer) => (peer.key || "").toLowerCase() === letter);
+}
+
+function releaseHeld() {
+  const id = holdingId || armingId;
+  if (!id) return;
+  const peer = peers.find((item) => item.id === id);
+  if (peer) void endHold(peer);
+  else {
+    holdingId = null;
+    armingId = null;
+    if (!preview) void invoke("hold_stop").catch(() => {});
+  }
 }
 
 async function fitWindow() {
@@ -195,6 +215,7 @@ async function fitWindow() {
 
 function render() {
   if (colorFor && !peers.some((peer) => peer.id === colorFor)) colorFor = null;
+  const needsKeys = keyboardOpen && peers.length > 0 && peers.every((peer) => !peer.key);
   const rows =
     peers.length === 0
       ? `<div class="empty"><strong>Nobody nearby yet</strong><p>Share your team key so teammates can find you.</p></div>`
@@ -230,13 +251,15 @@ function render() {
                     </div>
                   </div>`
                 : "";
+            const showingKey = Boolean(peer.key) && holdingId !== peer.id && armingId !== peer.id;
+            const hint = showingKey ? `<kbd>${esc(peer.key || "")}</kbd>` : esc(hintText(peer));
             return `<div class="${classes}" data-id="${esc(peer.id)}">
               <span class="avatar-wrap">
                 <svg class="ring" viewBox="0 0 44 44" aria-hidden="true"><circle cx="22" cy="22" r="20"></circle></svg>
                 <span class="avatar" style="background:${avatarColor(peer)}">${face}</span>
               </span>
               <span class="who"><span class="name">${esc(peer.name)}</span><span class="status">${esc(statusText(peer))}</span></span>
-              <span class="hint">${esc(hintText(peer))}</span>
+              <span class="hint">${hint}</span>
             </div>${colorPanel}`;
           })
           .join("");
@@ -244,6 +267,7 @@ function render() {
   app.innerHTML = `
     <div class="popover">
       ${statusMessage ? `<p class="error">${esc(statusMessage)}</p>` : ""}
+      ${needsKeys ? `<p class="keys-note">Set a key for each person in Settings, then hold it.</p>` : ""}
       <div class="peers">${rows}</div>
       <footer class="foot">
         <button type="button" id="open-settings" class="icon-btn" aria-label="Settings" title="Settings">
@@ -422,17 +446,19 @@ async function commitColor() {
   }
 }
 
-async function beginArm(peer: Peer) {
+async function beginArm(peer: Peer, via: "pointer" | "key" = "pointer") {
   if (holdingId || armingId) return;
   armingId = peer.id;
   statusMessage = "";
-  const stop = () => {
-    window.removeEventListener("pointerup", stop);
-    window.removeEventListener("pointercancel", stop);
-    void endHold(peer);
-  };
-  window.addEventListener("pointerup", stop);
-  window.addEventListener("pointercancel", stop);
+  if (via === "pointer") {
+    const stop = () => {
+      window.removeEventListener("pointerup", stop);
+      window.removeEventListener("pointercancel", stop);
+      void endHold(peer);
+    };
+    window.addEventListener("pointerup", stop);
+    window.addEventListener("pointercancel", stop);
+  }
   render();
   window.setTimeout(() => {
     if (armingId !== peer.id) return;
@@ -529,6 +555,16 @@ void listen<string>("peer-busy", (event) => {
   render();
 }).catch(() => {});
 
+void listen("keyboard-roster", () => {
+  keyboardOpen = true;
+  render();
+}).catch(() => {});
+
+void listen("popover-hidden", () => {
+  keyboardOpen = false;
+  releaseHeld();
+}).catch(() => {});
+
 void listen<{ id: string; hash: string }>("avatar-updated", (event) => {
   void loadAvatar(event.payload.id, event.payload.hash);
 }).catch(() => {});
@@ -550,6 +586,38 @@ async function refreshAvatars() {
   await Promise.all(peers.filter((peer) => peer.avatarHash).map((peer) => loadAvatar(peer.id, peer.avatarHash!)));
 }
 
+window.addEventListener("keydown", (event) => {
+  if (document.hidden || !document.hasFocus()) return;
+  if (event.metaKey || event.ctrlKey || event.altKey) return;
+  if (event.key === "Escape") {
+    if (colorFor) {
+      if (dialDirty) void commitColor();
+      colorFor = null;
+      render();
+      return;
+    }
+    releaseHeld();
+    if (!preview) void invoke("dismiss_popover").catch(() => {});
+    return;
+  }
+  if (event.repeat || colorFor || event.key.length !== 1) return;
+  const peer = peerForKey(event.key);
+  if (!peer || !holdable(peer)) return;
+  event.preventDefault();
+  void beginArm(peer, "key");
+});
+
+window.addEventListener("keyup", (event) => {
+  const peer = peerForKey(event.key);
+  if (!peer) return;
+  if (holdingId === peer.id || armingId === peer.id) void endHold(peer);
+});
+
+window.addEventListener("blur", () => releaseHeld());
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) releaseHeld();
+});
+
 async function boot() {
   if (preview) {
     peers = preview.peers;
@@ -560,6 +628,7 @@ async function boot() {
   try {
     peers = await invoke<Peer[]>("list_peers");
     dndOn = await invoke<boolean>("dnd_state");
+    keyboardOpen = await invoke<boolean>("consume_keyboard_open");
     void refreshAvatars();
   } catch (error) {
     statusMessage = formatErr(error);

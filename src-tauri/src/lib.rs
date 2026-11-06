@@ -10,13 +10,13 @@ mod settings;
 mod status;
 
 use crate::peer::{PeerInfo, PeerRecord};
-use discovery::peer_list_from_map;
+use discovery::{hide_person, peer_list_from_map};
 use network::{resolve_hold_addrs, stable_sender_id, NetworkRuntime};
 use overlay_state::OverlayStateMachine;
 use parking_lot::Mutex;
 use settings::{
-    effective_dnd, generate_team_key, load_settings, normalize_glow,
-    canonical_color, normalize_screens, normalize_theme, save_settings, settings_path, Settings,
+    canonical_color, effective_dnd, generate_team_key, load_settings, normalize_glow,
+    normalize_screens, normalize_theme, save_settings, settings_path, Settings,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -55,6 +55,8 @@ fn save_app_settings(
             false
         };
         incoming.peer_colors = current.peer_colors.clone();
+        incoming.peer_keys = current.peer_keys.clone();
+        incoming.roster_shortcut = current.roster_shortcut.clone();
         incoming.glow_style = normalize_glow(&incoming.glow_style);
         incoming.overlay_screens = normalize_screens(&incoming.overlay_screens);
         incoming.theme = normalize_theme(&incoming.theme);
@@ -95,6 +97,89 @@ fn set_do_not_disturb(state: State<AppState>, enabled: bool, app: AppHandle) -> 
     let _ = app.emit("settings-changed", saved.clone());
     let _ = app.emit("dnd-changed", effective_dnd(&saved, focused));
     Ok(())
+}
+
+#[tauri::command]
+fn remove_person(
+    state: State<AppState>,
+    peer_id: String,
+    app: AppHandle,
+) -> Result<Settings, String> {
+    let map = state.peers.lock().clone();
+    let saved = {
+        let mut cfg = state.settings.lock();
+        hide_person(&mut cfg, &map, &peer_id);
+        save_settings(&cfg)?;
+        cfg.clone()
+    };
+    let _ = app.emit(
+        "peers-updated",
+        peer_list_from_map(&state.peers.lock(), &saved),
+    );
+    let _ = app.emit("settings-changed", saved.clone());
+    Ok(saved)
+}
+
+#[tauri::command]
+fn refresh_peers(state: State<AppState>) -> Result<(), String> {
+    let network = state.network.lock();
+    let Some(network) = network.as_ref() else {
+        return Err("Tap is still starting.".into());
+    };
+    network.request_refresh();
+    Ok(())
+}
+
+#[tauri::command]
+fn discovery_refreshed_at(state: State<AppState>) -> Option<u64> {
+    state
+        .network
+        .lock()
+        .as_ref()
+        .and_then(|network| network.refreshed_at())
+}
+
+#[tauri::command]
+fn set_peer_key(
+    state: State<AppState>,
+    peer_id: String,
+    key: String,
+    app: AppHandle,
+) -> Result<Settings, String> {
+    let peer_id = peer_id.trim().to_string();
+    if peer_id.is_empty() {
+        return Err("Choose a person first.".into());
+    }
+    let names: HashMap<String, String> = state
+        .peers
+        .lock()
+        .iter()
+        .map(|(id, peer)| (id.clone(), peer.name.clone()))
+        .collect();
+    let group = discovery::ids_for_person(&state.peers.lock(), &peer_id);
+    let group_refs: Vec<&str> = group.iter().map(String::as_str).collect();
+    let cfg = {
+        let mut cfg = state.settings.lock();
+        if let Err(err) = settings::assign_hotkey(&mut cfg, &peer_id, &key, &group_refs) {
+            if let Some(owner_id) = err.strip_prefix("taken:") {
+                let name = names.get(owner_id).cloned().unwrap_or_else(|| "someone".into());
+                let shown = settings::normalize_hotkey(&key).unwrap_or_default();
+                let shown = if shown.is_empty() {
+                    key.trim().to_string()
+                } else {
+                    shown.to_ascii_uppercase()
+                };
+                return Err(format!("{shown} is already {name}'s key."));
+            }
+            return Err(err);
+        }
+        save_settings(&cfg)?;
+        cfg.clone()
+    };
+    let list = peer_list_from_map(&state.peers.lock(), &cfg);
+    let _ = app.emit("peers-updated", list);
+    let _ = app.emit("settings-changed", cfg.clone());
+    Ok(cfg)
 }
 
 #[tauri::command]
@@ -214,6 +299,7 @@ fn configure_autostart(app: &AppHandle, enabled: bool) -> Result<(), String> {
 }
 
 static TRAY_SENDING: AtomicBool = AtomicBool::new(false);
+static KEYBOARD_ROSTER: AtomicBool = AtomicBool::new(false);
 static TRAY_RECEIVING: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn set_tray_sending(app: &AppHandle, sending: bool) {
@@ -292,9 +378,9 @@ fn keep_off_taskbar(window: &WebviewWindow) {
     let _ = window.set_skip_taskbar(true);
 }
 
-fn present_popover(window: &WebviewWindow) {
+fn present_popover(window: &WebviewWindow, immediate_focus: bool) {
     #[cfg(target_os = "macos")]
-    if order_popover_front(window) {
+    if order_popover_front(window, immediate_focus) {
         return;
     }
     let _ = window.show();
@@ -302,7 +388,7 @@ fn present_popover(window: &WebviewWindow) {
 }
 
 #[cfg(target_os = "macos")]
-fn order_popover_front(window: &WebviewWindow) -> bool {
+fn order_popover_front(window: &WebviewWindow, immediate_focus: bool) -> bool {
     let Ok(raw) = window.ns_window() else {
         return false;
     };
@@ -317,9 +403,13 @@ fn order_popover_front(window: &WebviewWindow) -> bool {
         let _: () = objc2::msg_send![ns, setAcceptsMouseMovedEvents: objc2::runtime::Bool::YES];
         let _: () = objc2::msg_send![ns, orderFrontRegardless];
     }
+    if immediate_focus {
+        focus_popover(ns);
+    }
     // The status-item mouse-up resigns key if we activate during mouse-down,
     // which leaves the popover visible but without hover. Become key after
-    // that click finishes.
+    // that click finishes. The keyboard roster asks for focus immediately
+    // because there is no mouse-up coming.
     dispatch2::DispatchQueue::main().exec_async(move || {
         focus_popover(ns_bits as *mut objc2::runtime::AnyObject);
     });
@@ -349,6 +439,16 @@ fn focus_popover(ns: *mut objc2::runtime::AnyObject) {
 }
 
 fn show_popover(app: &AppHandle, anchor: Option<&tauri::Rect>) {
+    show_popover_inner(app, anchor, false);
+}
+
+fn show_keyboard_roster(app: &AppHandle) {
+    KEYBOARD_ROSTER.store(true, Ordering::Relaxed);
+    show_popover_inner(app, None, true);
+    let _ = app.emit("keyboard-roster", true);
+}
+
+fn show_popover_inner(app: &AppHandle, anchor: Option<&tauri::Rect>, immediate_focus: bool) {
     if let Some(anchor) = anchor_from(app, anchor) {
         if let Ok(mut slot) = POPOVER_ANCHOR.lock() {
             *slot = Some(anchor);
@@ -360,7 +460,7 @@ fn show_popover(app: &AppHandle, anchor: Option<&tauri::Rect>) {
         keep_off_taskbar(&window);
         let _ = window.unminimize();
         position_popover(app, &window);
-        present_popover(&window);
+        present_popover(&window, immediate_focus);
     }
     #[cfg(target_os = "macos")]
     arm_popover_dismiss(app);
@@ -377,8 +477,14 @@ fn hide_popover(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
     }
+    note_popover_hidden(app);
     #[cfg(target_os = "macos")]
     disarm_popover_monitors();
+}
+
+fn note_popover_hidden(app: &AppHandle) {
+    KEYBOARD_ROSTER.store(false, Ordering::Relaxed);
+    let _ = app.emit("popover-hidden", ());
 }
 
 fn toggle_popover(app: &AppHandle, anchor: Option<&tauri::Rect>) {
@@ -682,6 +788,7 @@ fn dismiss_popover_from_monitor(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
     }
+    note_popover_hidden(app);
     let app = app.clone();
     // Unregister after this callback returns. Removing the monitor that is
     // currently invoking us can free it out from under AppKit.
@@ -1118,6 +1225,263 @@ fn hide_settings(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn dismiss_popover(app: AppHandle) {
+    hide_popover(&app);
+}
+
+#[tauri::command]
+fn consume_keyboard_open() -> bool {
+    KEYBOARD_ROSTER.swap(false, Ordering::Relaxed)
+}
+
+#[cfg(target_os = "linux")]
+static ROSTER_SHORTCUT: Mutex<String> = Mutex::new(String::new());
+#[cfg(target_os = "linux")]
+static ROSTER_SHORTCUT_ERROR: Mutex<String> = Mutex::new(String::new());
+
+#[cfg(target_os = "linux")]
+const GNOME_SHORTCUT_PATH: &str =
+    "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/tap-team/";
+
+#[tauri::command]
+fn set_roster_shortcut(
+    state: State<AppState>,
+    shortcut: String,
+    app: AppHandle,
+) -> Result<Settings, String> {
+    let normalized = settings::normalize_roster_shortcut(&shortcut)?;
+    #[cfg(target_os = "linux")]
+    {
+        // Registering waits for the main thread. Do it off this command so a
+        // main-thread command cannot deadlock on itself.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let registered = normalized.clone();
+        let background = app.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(apply_roster_shortcut(&background, &registered));
+        });
+        rx.recv()
+            .map_err(|_| "Couldn't register that shortcut.".to_string())??;
+        let saved = {
+            let mut cfg = state.settings.lock();
+            cfg.roster_shortcut = Some(normalized);
+            save_settings(&cfg)?;
+            cfg.clone()
+        };
+        let _ = app.emit("settings-changed", saved.clone());
+        return Ok(saved);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (state, app, normalized);
+        Err("On macOS, set this shortcut on the Raycast command.".into())
+    }
+}
+
+#[tauri::command]
+fn roster_shortcut_error() -> String {
+    #[cfg(target_os = "linux")]
+    {
+        return ROSTER_SHORTCUT_ERROR.lock().clone();
+    }
+    #[cfg(not(target_os = "linux"))]
+    String::new()
+}
+
+#[cfg(target_os = "linux")]
+fn session_is_wayland() -> bool {
+    std::env::var("XDG_SESSION_TYPE")
+        .map(|value| value.eq_ignore_ascii_case("wayland"))
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "linux")]
+fn desktop_is_gnome() -> bool {
+    std::env::var("XDG_CURRENT_DESKTOP")
+        .map(|value| value.to_ascii_lowercase().contains("gnome"))
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "linux")]
+fn apply_roster_shortcut(app: &AppHandle, raw: &str) -> Result<(), String> {
+    let normalized = settings::normalize_roster_shortcut(raw)?;
+    if desktop_is_gnome() {
+        match sync_gnome_shortcut(&settings::gnome_accelerator(&normalized)) {
+            Ok(()) => {
+                let _ = unregister_plugin_shortcut(app);
+                *ROSTER_SHORTCUT.lock() = normalized;
+                ROSTER_SHORTCUT_ERROR.lock().clear();
+                return Ok(());
+            }
+            Err(err) => {
+                if session_is_wayland() {
+                    return remember_roster_error(format!(
+                        "{err} Add a keyboard shortcut that runs: xdg-open tap://keys"
+                    ));
+                }
+            }
+        }
+    } else if session_is_wayland() {
+        return remember_roster_error(
+            "This Wayland session can't give Tap a global shortcut. Add a keyboard shortcut that runs: xdg-open tap://keys"
+                .to_string(),
+        );
+    }
+    register_plugin_shortcut(app, &normalized)?;
+    *ROSTER_SHORTCUT.lock() = normalized;
+    ROSTER_SHORTCUT_ERROR.lock().clear();
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn remember_roster_error(message: String) -> Result<(), String> {
+    *ROSTER_SHORTCUT_ERROR.lock() = message.clone();
+    Err(message)
+}
+
+#[cfg(target_os = "linux")]
+fn register_plugin_shortcut(app: &AppHandle, normalized: &str) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    let gs = app.global_shortcut();
+    let mut current = ROSTER_SHORTCUT.lock();
+    if *current == normalized {
+        return Ok(());
+    }
+    let previous = current.clone();
+    if !previous.is_empty() {
+        let _ = gs.unregister(previous.as_str());
+    }
+    if normalized.is_empty() {
+        current.clear();
+        return Ok(());
+    }
+    if let Err(err) = gs.register(normalized) {
+        if !previous.is_empty() {
+            let _ = gs.register(previous.as_str());
+            *current = previous;
+        }
+        return remember_roster_error(format!("Couldn't register that shortcut ({err})."));
+    }
+    *current = normalized.to_string();
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn unregister_plugin_shortcut(app: &AppHandle) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    let mut current = ROSTER_SHORTCUT.lock();
+    if current.is_empty() {
+        return Ok(());
+    }
+    let _ = app.global_shortcut().unregister(current.as_str());
+    current.clear();
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn sync_gnome_shortcut(accelerator: &str) -> Result<(), String> {
+    let listed = gsettings(&[
+        "get",
+        "org.gnome.settings-daemon.plugins.media-keys",
+        "custom-keybindings",
+    ])?;
+    let mut paths = gsettings_paths(&listed);
+    let owned = paths.iter().any(|path| shortcut_paths_match(path, GNOME_SHORTCUT_PATH));
+    if !owned {
+        paths.push(GNOME_SHORTCUT_PATH.to_string());
+        let list = format!(
+            "[{}]",
+            paths
+                .iter()
+                .map(|path| format!("'{path}'"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        gsettings(&[
+            "set",
+            "org.gnome.settings-daemon.plugins.media-keys",
+            "custom-keybindings",
+            &list,
+        ])?;
+    }
+    let schema = format!(
+        "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:{GNOME_SHORTCUT_PATH}"
+    );
+    gsettings(&["set", &schema, "name", "'Open Tap team'"])?;
+    gsettings(&["set", &schema, "command", "'xdg-open tap://keys'"])?;
+    let binding = if accelerator.is_empty() {
+        "''".to_string()
+    } else {
+        format!("'{accelerator}'")
+    };
+    gsettings(&["set", &schema, "binding", &binding])?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn shortcut_paths_match(left: &str, right: &str) -> bool {
+    left.trim_end_matches('/') == right.trim_end_matches('/')
+}
+
+#[cfg(target_os = "linux")]
+fn gsettings_paths(raw: &str) -> Vec<String> {
+    let Some(start) = raw.find('[') else {
+        return Vec::new();
+    };
+    let Some(end) = raw.rfind(']') else {
+        return Vec::new();
+    };
+    raw[start + 1..end]
+        .split(',')
+        .filter_map(|part| {
+            let path = part.trim().trim_matches('\'').trim();
+            if path.is_empty() {
+                None
+            } else {
+                Some(path.to_string())
+            }
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn gsettings(args: &[&str]) -> Result<String, String> {
+    let output = std::process::Command::new("gsettings")
+        .args(args)
+        .output()
+        .map_err(|_| "gsettings isn't available.".to_string())?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        let err = err.trim();
+        if err.is_empty() {
+            return Err("Couldn't update the GNOME shortcut.".into());
+        }
+        return Err(err.to_string());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn is_keyboard_link(raw: &str) -> bool {
+    let raw = raw.trim().to_ascii_lowercase();
+    let Some(rest) = raw
+        .strip_prefix("tap://")
+        .or_else(|| raw.strip_prefix("tap:"))
+    else {
+        return false;
+    };
+    let rest = rest.trim_start_matches('/');
+    let token = rest.split(['/', '?', '#']).next().unwrap_or("");
+    token == "keys"
+}
+
+fn open_urls(app: &AppHandle, urls: impl IntoIterator<Item = impl AsRef<str>>) {
+    if urls.into_iter().any(|url| is_keyboard_link(url.as_ref())) {
+        let shown = app.clone();
+        let _ = app.run_on_main_thread(move || show_keyboard_roster(&shown));
+    }
+}
+
+#[tauri::command]
 fn open_settings(app: AppHandle) -> Result<(), String> {
     let Some(window) = app.get_webview_window("settings") else {
         return Err("Settings window is not available.".into());
@@ -1141,6 +1505,12 @@ fn open_settings(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Hardware presence probe. Exits the process. See `status`.
+#[cfg(target_os = "macos")]
+pub fn run_status_probe() -> ! {
+    status::run_probe();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let settings_file_existed = settings_path().exists();
@@ -1151,11 +1521,36 @@ pub fn run() {
         let _ = save_settings(&loaded);
         open_setup = true;
     }
+    #[cfg(target_os = "linux")]
+    if loaded.roster_shortcut.is_none() {
+        loaded.roster_shortcut = Some(settings::DEFAULT_ROSTER_SHORTCUT.into());
+        let _ = save_settings(&loaded);
+    }
     let settings = Arc::new(Mutex::new(loaded));
     let overlay = Arc::new(Mutex::new(OverlayStateMachine::default()));
     let peers = Arc::new(Mutex::new(HashMap::new()));
 
-    let mut app = tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    // Single instance has to be registered first so a second `tap://` launch
+    // is forwarded here instead of becoming another menu-bar app.
+    builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+        open_urls(app, args);
+    }));
+    #[cfg(target_os = "linux")]
+    {
+        builder = builder.plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                        let shown = app.clone();
+                        let _ = app.run_on_main_thread(move || show_keyboard_roster(&shown));
+                    }
+                })
+                .build(),
+        );
+    }
+    let mut app = builder
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_opener::init())
@@ -1241,6 +1636,34 @@ pub fn run() {
                 let _ = window.hide();
             }
 
+            #[cfg(any(target_os = "linux", all(debug_assertions, windows)))]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let _ = app.deep_link().register_all();
+            }
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let handle = app.handle().clone();
+                if let Ok(Some(urls)) = app.deep_link().get_current() {
+                    open_urls(&handle, urls.iter().map(|url| url.as_str().to_string()));
+                }
+                app.deep_link().on_open_url(move |event| {
+                    open_urls(&handle, event.urls().iter().map(|url| url.to_string()));
+                });
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let handle = app.handle().clone();
+                let raw = settings
+                    .lock()
+                    .roster_shortcut
+                    .clone()
+                    .unwrap_or_default();
+                std::thread::spawn(move || {
+                    let _ = apply_roster_shortcut(&handle, &raw);
+                });
+            }
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -1258,6 +1681,8 @@ pub fn run() {
             save_app_settings,
             open_settings,
             hide_settings,
+            dismiss_popover,
+            consume_keyboard_open,
             reposition_popover,
             list_peers,
             hold_start,
@@ -1268,6 +1693,12 @@ pub fn run() {
             dnd_state,
             set_do_not_disturb,
             set_peer_color,
+            set_peer_key,
+            set_roster_shortcut,
+            roster_shortcut_error,
+            remove_person,
+            refresh_peers,
+            discovery_refreshed_at,
             set_avatar,
             my_avatar,
             peer_avatar,
@@ -1299,6 +1730,15 @@ mod popover_placement_tests {
         assert!(super::rect_contains(10.0, 10.0, 0.0, 0.0, 20.0, 20.0));
         assert!(!super::rect_contains(20.0, 10.0, 0.0, 0.0, 20.0, 20.0));
         assert!(!super::rect_contains(-0.5, 10.0, 0.0, 0.0, 20.0, 20.0));
+    }
+
+    #[test]
+    fn keyboard_link_is_only_the_keys_roster() {
+        assert!(super::is_keyboard_link("tap://keys"));
+        assert!(super::is_keyboard_link("tap://keys/"));
+        assert!(super::is_keyboard_link("  TAP://Keys?from=raycast"));
+        assert!(!super::is_keyboard_link("tap://settings"));
+        assert!(!super::is_keyboard_link("https://example.com/keys"));
     }
 
     #[test]

@@ -27,6 +27,9 @@ pub struct PeerInfo {
     pub avatar_hash: String,
     /// Color this machine uses for the peer.
     pub color: String,
+    /// Letter or digit assigned on this Mac. Empty when unset.
+    #[serde(default)]
+    pub key: String,
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +57,7 @@ impl PeerRecord {
             status: self.status.clone(),
             avatar_hash: self.avatar_hash.clone(),
             color: String::new(),
+            key: String::new(),
         }
     }
 }

@@ -19,6 +19,7 @@ type Settings = {
   launchAtLogin: boolean;
   tailnetOnly: boolean;
   manualPeers: string[];
+  hiddenPeers?: string[];
   listenPort: number;
   followSystemDnd: boolean;
   suppressSystemDnd: boolean;
@@ -27,6 +28,8 @@ type Settings = {
   overlayScreens: string;
   selectedDisplays: string[];
   peerColors: Record<string, string>;
+  peerKeys?: Record<string, string>;
+  rosterShortcut?: string | null;
   theme?: string;
 };
 
@@ -34,11 +37,14 @@ type Preview = { settings: Settings; peers?: TeamPeer[] };
 
 const preview = (window as Window & { __TAP_PREVIEW__?: Preview }).__TAP_PREVIEW__ ?? null;
 
+const GLOW_STYLES = ["line", "edge", "bold", "soft", "wash", "corners"];
+
 type TeamPeer = {
   id: string;
   name: string;
   color?: string;
   avatarHash?: string;
+  key?: string;
   source?: string;
   addresses?: string[];
 };
@@ -50,6 +56,7 @@ type PersonRow = {
   avatarHash?: string;
   manualIndex?: number;
   detail?: string;
+  hotkey: string;
 };
 
 type ManualEntry = { index: number; name: string; host: string; id: string };
@@ -69,6 +76,9 @@ let colorBefore: { hadSaved: boolean; color?: string } | null = null;
 let displays: string[] = [];
 let photo = "";
 let adding = false;
+let addDraft = "";
+let refreshedAt: number | null = null;
+let refreshBusy = false;
 let error = "";
 let appVersion = "";
 let updateBusy = false;
@@ -85,6 +95,9 @@ const tabs: { id: Tab; label: string }[] = [
 ];
 
 let tab: Tab = "profile";
+let armingShortcut = false;
+let shortcutNote = "";
+const linux = /Linux/i.test(navigator.userAgent);
 
 const root = document.querySelector<HTMLDivElement>("#settings")!;
 
@@ -207,6 +220,86 @@ function sameHost(manualHost: string, address: string): boolean {
   return true;
 }
 
+function refreshedLabel(at: number | null): string {
+  if (at == null) return "Not refreshed yet";
+  const time = new Date(at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return `Last refreshed ${time}`;
+}
+
+function personKey(name: string): string {
+  return name.trim().replace(/\.+$/, "").toLowerCase();
+}
+
+function samePerson(a: TeamPeer, b: TeamPeer): boolean {
+  const ips = new Set((a.addresses ?? []).map((addr) => bareHost(addr).toLowerCase()));
+  if ((b.addresses ?? []).some((addr) => ips.has(bareHost(addr).toLowerCase()))) return true;
+  const left = personKey(a.name);
+  const right = personKey(b.name);
+  return left.length > 0 && left === right;
+}
+
+function clusterIds(id: string): string[] {
+  const ids = new Set<string>([id]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const peer of peers) {
+      if (ids.has(peer.id)) continue;
+      if (peers.some((other) => ids.has(other.id) && samePerson(peer, other))) {
+        ids.add(peer.id);
+        grew = true;
+      }
+    }
+  }
+  return [...ids];
+}
+
+async function refreshPeople() {
+  if (!settings) return;
+  if (preview) {
+    refreshedAt = Date.now();
+    render();
+    return;
+  }
+  refreshBusy = true;
+  render();
+  try {
+    await invoke("refresh_peers");
+    error = "";
+  } catch (err) {
+    refreshBusy = false;
+    error = typeof err === "string" ? err : "Couldn't refresh.";
+    render();
+  }
+}
+
+async function removePerson(id: string) {
+  if (!settings) return;
+  const cluster = new Set(clusterIds(id));
+  settings.hiddenPeers = [...new Set([...(settings.hiddenPeers ?? []), ...cluster])];
+  settings.manualPeers = settings.manualPeers.filter((entry, index) => {
+    const parsed = parseManual(entry, index);
+    if (!parsed) return false;
+    if (cluster.has(parsed.id)) return false;
+    const removed = peers.filter((peer) => cluster.has(peer.id));
+    if (removed.some((peer) => personKey(peer.name) === personKey(parsed.name))) return false;
+    if (removed.some((peer) => (peer.addresses ?? []).some((addr) => sameHost(parsed.host, addr)))) return false;
+    return true;
+  });
+  peers = peers.filter((peer) => !cluster.has(peer.id));
+  if (colorFor && cluster.has(colorFor)) colorFor = null;
+  render();
+  if (preview) return;
+  try {
+    settings = await invoke<Settings>("remove_person", { peerId: id });
+    peers = await invoke<TeamPeer[]>("list_peers");
+    error = "";
+  } catch (err) {
+    error = typeof err === "string" ? err : "Couldn't remove that person.";
+  }
+  render();
+}
+
 function parseManual(entry: string, index: number): ManualEntry | null {
   const trimmed = entry.trim();
   if (!trimmed) return null;
@@ -217,13 +310,93 @@ function parseManual(entry: string, index: number): ManualEntry | null {
   return { index, name: name || host, host, id: `manual-${name || host}-${host}` };
 }
 
+function shortcutLabel(raw: string | null | undefined): string {
+  if (!raw) return "";
+  return raw
+    .split("+")
+    .map((part) => {
+      if (part === "ctrl") return "Ctrl";
+      if (part === "alt") return "Alt";
+      if (part === "shift") return "Shift";
+      if (part === "super") return "Super";
+      if (part.startsWith("Key") && part.length === 4) return part.slice(3);
+      if (part.startsWith("Digit")) return part.slice(5);
+      if (part.startsWith("Arrow")) return part.slice(5);
+      if (part.startsWith("Numpad")) return `Num ${part.slice(6)}`;
+      return part;
+    })
+    .join("+");
+}
+
+function chordFromEvent(event: KeyboardEvent): string | null {
+  if (!(event.metaKey || event.ctrlKey || event.altKey || event.shiftKey)) return null;
+  if (/^(Control|Alt|Shift|Meta|OS)/.test(event.code)) return null;
+  const mods: string[] = [];
+  if (event.ctrlKey) mods.push("ctrl");
+  if (event.altKey) mods.push("alt");
+  if (event.shiftKey) mods.push("shift");
+  if (event.metaKey) mods.push("super");
+  return [...mods, event.code].join("+");
+}
+
+async function saveRosterShortcut(raw: string) {
+  armingShortcut = false;
+  if (!settings) return;
+  if (preview) {
+    settings.rosterShortcut = raw;
+    shortcutNote = "";
+    render();
+    return;
+  }
+  try {
+    settings = await invoke<Settings>("set_roster_shortcut", { shortcut: raw });
+    shortcutNote = await invoke<string>("roster_shortcut_error");
+  } catch (err) {
+    shortcutNote = typeof err === "string" ? err : "Couldn't set that shortcut.";
+  }
+  render();
+}
+
+function savedKey(id: string): string {
+  const keys = settings?.peerKeys;
+  if (!keys) return "";
+  if (keys[id]) return keys[id];
+  for (const other of clusterIds(id)) {
+    if (keys[other]) return keys[other];
+  }
+  return "";
+}
+
+async function assignKey(id: string, raw: string) {
+  if (!settings || !id) return;
+  error = "";
+  if (preview) {
+    const next = { ...(settings.peerKeys || {}) };
+    const key = raw.trim().toLowerCase();
+    for (const other of clusterIds(id)) delete next[other];
+    if (key) next[id] = key.slice(0, 1);
+    settings.peerKeys = next;
+    render();
+    return;
+  }
+  try {
+    settings = await invoke<Settings>("set_peer_key", { peerId: id, key: raw });
+    peers = await invoke<TeamPeer[]>("list_peers");
+    error = "";
+  } catch (err) {
+    error = typeof err === "string" ? err : "Couldn't save that key.";
+  }
+  render();
+}
+
 function peopleRows(): PersonRow[] {
   const manuals = (settings?.manualPeers ?? [])
     .map((entry, index) => parseManual(entry, index))
     .filter((entry): entry is ManualEntry => entry !== null);
+  const hidden = new Set(settings?.hiddenPeers ?? []);
   const used = new Set<number>();
   const byId = new Map(manuals.map((entry) => [entry.id, entry]));
-  const rows: PersonRow[] = peers.map((peer) => {
+  const rows: PersonRow[] = peers.filter((peer) => !hidden.has(peer.id)).map((peer) => {
     let manual = byId.get(peer.id);
     if (!manual) {
       manual = manuals.find(
@@ -238,16 +411,18 @@ function peopleRows(): PersonRow[] {
       avatarHash: peer.avatarHash,
       manualIndex: manual?.index,
       detail: manual && manual.host !== peer.name ? manual.host : undefined,
+      hotkey: peer.key || "",
     };
   });
   for (const manual of manuals) {
-    if (used.has(manual.index)) continue;
+    if (used.has(manual.index) || hidden.has(manual.id)) continue;
     rows.push({
       id: manual.id,
       name: manual.name,
       color: settings?.peerColors?.[manual.id] || autoColor(manual.id),
       manualIndex: manual.index,
       detail: manual.host !== manual.name ? manual.host : undefined,
+      hotkey: savedKey(manual.id),
     });
   }
   rows.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
@@ -255,11 +430,17 @@ function peopleRows(): PersonRow[] {
 }
 
 function render() {
+  const addField = document.getElementById("add-peer") as HTMLInputElement | null;
+  const keepAddFocus = addField != null && document.activeElement === addField;
+  const addSel: [number, number] | null = keepAddFocus
+    ? [addField.selectionStart ?? addDraft.length, addField.selectionEnd ?? addDraft.length]
+    : null;
+  if (addField) addDraft = addField.value;
   if (!settings) {
     root.innerHTML = `<div class="settings"><p class="error">${esc(error || "Loading settings")}</p></div>`;
     return;
   }
-  const glow = settings.glowStyle === "soft" || settings.glowStyle === "bold" ? settings.glowStyle : "edge";
+  const glow = GLOW_STYLES.includes(settings.glowStyle) ? settings.glowStyle : "edge";
   const screens = settings.overlayScreens || "all";
   const selected = new Set(settings.selectedDisplays || []);
   const panel =
@@ -308,12 +489,10 @@ function render() {
       <div>
         <div class="swatch-label">Glow</div>
         <div class="choices">
-          ${["edge", "soft", "bold"]
-            .map(
-              (style) =>
-                `<button class="choice${glow === style ? " selected" : ""}" type="button" data-glow="${style}">${style[0].toUpperCase()}${style.slice(1)}</button>`,
-            )
-            .join("")}
+          ${GLOW_STYLES.map(
+            (style) =>
+              `<button class="choice${glow === style ? " selected" : ""}" type="button" data-glow="${style}">${style[0].toUpperCase()}${style.slice(1)}</button>`,
+          ).join("")}
         </div>
         <label class="check"><input id="banner" type="checkbox" ${settings.showBanner !== false ? "checked" : ""} />Show the name banner</label>
         <button id="preview-glow" class="preview" type="button">Preview</button>
@@ -336,18 +515,23 @@ function render() {
                       <span class="member-title">${esc(person.name)}</span>
                       ${person.detail ? `<span class="member-detail">${esc(person.detail)}</span>` : ""}
                     </span>
+                    <input class="member-key" data-hotkey="${esc(person.id)}" type="text" inputmode="text" maxlength="1" spellcheck="false" autocomplete="off" value="${esc(person.hotkey)}" placeholder="·" aria-label="Key for ${esc(person.name)}" title="Press a letter or number. Backspace clears it." />
                     <button type="button" class="swatch" data-colors="${esc(person.id)}" style="--swatch:${esc(person.color)}" aria-expanded="${open ? "true" : "false"}" aria-label="Color for ${esc(person.name)}"></button>
-                    ${person.manualIndex === undefined ? "" : `<button type="button" class="member-remove" data-remove="${person.manualIndex}">Remove</button>`}
+                    <button type="button" class="member-remove" data-remove="${esc(person.id)}">Remove</button>
                   </div>`;
                 })
                 .join("")
         }
         ${
           adding
-            ? `<input id="add-peer" class="add-input mono" type="text" placeholder="Host name or IP" />`
+            ? `<input id="add-peer" class="add-input mono" type="text" placeholder="Host name or IP" value="${esc(addDraft)}" />`
             : `<button id="add" class="add" type="button">+ Add someone</button>`
         }
-        <p class="note">The color is for this Mac. A photo stays a photo; the glow still uses the color. Add a host when Tap can't find someone.</p>
+        <p class="note">Give each person one key on this computer. ${linux ? "After the Open team list shortcut," : "After your Raycast shortcut opens Tap,"} hold that key to tap them. Backspace clears a key. The color stays on this computer. Remove hides someone here.</p>
+      </div>
+      <div class="update-row">
+        <div><strong>Find people</strong><small>${esc(refreshedLabel(refreshedAt))}</small></div>
+        <button id="refresh-people" type="button" ${refreshBusy ? "disabled" : ""}>${refreshBusy ? "Refreshing…" : "Refresh"}</button>
       </div>
       <div class="toggle-row">
         <div><strong>Tailscale only</strong><small>Only find people on your tailnet</small></div>
@@ -368,6 +552,14 @@ function render() {
             .join("")}
         </div>
       </div>
+      ${
+          linux
+            ? `<div class="update-row">
+        <div><strong>Open team list</strong><small>${esc(armingShortcut ? "Press Ctrl, Alt, Shift, or Super with a key. Backspace clears it." : shortcutNote || "Then hold someone's key from Team members.")}</small></div>
+        <button id="roster-shortcut" type="button">${armingShortcut ? "Listening…" : esc(shortcutLabel(settings.rosterShortcut) || "Set")}</button>
+      </div>`
+            : ""
+        }
       <div class="toggle-row">
         <div><strong>Launch at login</strong><small>Open Tap when you sign in</small></div>
         <button id="login" class="switch" type="button" role="switch" aria-checked="${settings.launchAtLogin ? "true" : "false"}">
@@ -411,6 +603,7 @@ function render() {
       tab = next;
       adding = false;
       colorFor = null;
+      armingShortcut = false;
       render();
       window.scrollTo(0, 0);
     };
@@ -505,6 +698,10 @@ function render() {
       render();
     };
   }
+  document.getElementById("roster-shortcut")?.addEventListener("click", () => {
+    armingShortcut = true;
+    render();
+  });
   const login = document.getElementById("login");
   if (login) {
     login.onclick = () => {
@@ -540,29 +737,61 @@ function render() {
       render();
     };
   }
+  for (const input of root.querySelectorAll<HTMLInputElement>("[data-hotkey]")) {
+    input.addEventListener("keydown", (event) => {
+      event.stopPropagation();
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      const id = input.dataset.hotkey || "";
+      if (event.key === "Escape") {
+        event.preventDefault();
+        input.blur();
+        return;
+      }
+      if (event.key === "Backspace" || event.key === "Delete") {
+        event.preventDefault();
+        void assignKey(id, "");
+        return;
+      }
+      if (event.key.length !== 1) return;
+      event.preventDefault();
+      void assignKey(id, event.key);
+    });
+    input.addEventListener("paste", (event) => {
+      event.preventDefault();
+      const text = event.clipboardData?.getData("text") ?? "";
+      void assignKey(input.dataset.hotkey || "", text.trim());
+    });
+  }
   for (const button of root.querySelectorAll<HTMLButtonElement>("[data-remove]")) {
     button.onclick = () => {
-      const index = Number(button.dataset.remove);
-      settings!.manualPeers = settings!.manualPeers.filter((_, i) => i !== index);
-      void persist();
-      render();
+      const id = button.dataset.remove || "";
+      if (id) void removePerson(id);
     };
   }
+  document.getElementById("refresh-people")?.addEventListener("click", () => {
+    void refreshPeople();
+  });
   document.getElementById("add")?.addEventListener("click", () => {
     adding = true;
+    addDraft = "";
     render();
     document.getElementById("add-peer")?.focus();
   });
   const add = document.getElementById("add-peer") as HTMLInputElement | null;
+  add?.addEventListener("input", () => {
+    addDraft = add.value;
+  });
   add?.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       const value = add.value.trim();
       adding = false;
+      addDraft = "";
       if (value) settings!.manualPeers = [...settings!.manualPeers, value];
       void persist();
       render();
     } else if (event.key === "Escape") {
       adding = false;
+      addDraft = "";
       render();
     }
   });
@@ -578,6 +807,11 @@ function render() {
     void checkForUpdates();
   });
   mountColorPop();
+  if (keepAddFocus) {
+    const restored = document.getElementById("add-peer") as HTMLInputElement | null;
+    restored?.focus();
+    if (restored && addSel) restored.setSelectionRange(addSel[0], addSel[1]);
+  }
 }
 
 function dialColor(): string {
@@ -810,6 +1044,7 @@ async function boot() {
     displays = await invoke<string[]>("list_displays");
     photo = (await invoke<string | null>("my_avatar")) || "";
     peers = await invoke<TeamPeer[]>("list_peers");
+    if (linux) shortcutNote = await invoke<string>("roster_shortcut_error");
     void Promise.all(peers.map((peer) => loadPeerPhoto(peer)));
   } catch (err) {
     error = typeof err === "string" ? err : "Couldn't load settings.";
@@ -820,12 +1055,40 @@ async function boot() {
     appVersion = "";
   }
   render();
+  void listen<number>("discovery-refreshed", (event) => {
+    refreshedAt = event.payload;
+    refreshBusy = false;
+    if (tab === "team" && !sliding) render();
+  }).catch(() => {});
+  try {
+    refreshedAt = await invoke<number | null>("discovery_refreshed_at");
+    if (tab === "team") render();
+  } catch {
+    // Discovery has not run yet.
+  }
   void listen<TeamPeer[]>("peers-updated", (event) => {
     peers = event.payload;
     void Promise.all(peers.map((peer) => loadPeerPhoto(peer)));
     if (tab === "team" && !sliding) render();
   }).catch(() => {});
   window.addEventListener("keydown", (event) => {
+    if (armingShortcut) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.repeat) return;
+      if (event.key === "Escape") {
+        armingShortcut = false;
+        render();
+        return;
+      }
+      if (event.key === "Backspace" || event.key === "Delete") {
+        void saveRosterShortcut("");
+        return;
+      }
+      const chord = chordFromEvent(event);
+      if (chord) void saveRosterShortcut(chord);
+      return;
+    }
     if (event.key === "Escape" && colorFor) {
       commitColor();
       colorFor = null;

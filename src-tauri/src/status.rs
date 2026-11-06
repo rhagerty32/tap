@@ -1,4 +1,10 @@
 //! Automatic presence line. First match wins.
+//!
+//! On macOS the hardware half of this runs in a child process. CoreAudio and
+//! CoreMediaIO null-deref inside `GetPropertyData` when the default device
+//! disappears (AirPods coming out), and that SIGSEGV kills whoever called it.
+//! A relaunch asks again immediately, so the menu-bar app died on the way back
+//! up too. The child is the one that takes the fault.
 
 pub const IDLE_SECS: f64 = 180.0;
 
@@ -17,13 +23,199 @@ pub fn pick_status(camera: bool, mic: bool, headphones: bool, idle: bool) -> &'s
 }
 
 pub fn current_status() -> String {
-    pick_status(
-        camera_in_use(),
-        mic_in_use(),
-        headphones_output(),
-        idle_long(),
-    )
-    .to_string()
+    let (camera, mic, headphones) = hardware_flags();
+    pick_status(camera, mic, headphones, idle_long()).to_string()
+}
+
+/// Prints `camera mic headphones` as `0`/`1` and exits. macOS only.
+#[cfg(target_os = "macos")]
+pub fn run_probe() -> ! {
+    disarm_crash_reporter();
+    let camera = u8::from(camera_in_use());
+    let mic = u8::from(mic_in_use());
+    let headphones = u8::from(headphones_output());
+    println!("{camera} {mic} {headphones}");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    std::process::exit(0);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn hardware_flags() -> (bool, bool, bool) {
+    (camera_in_use(), mic_in_use(), headphones_output())
+}
+
+#[cfg(target_os = "macos")]
+fn hardware_flags() -> (bool, bool, bool) {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    static CACHE: Mutex<(bool, bool, bool)> = Mutex::new((false, false, false));
+    static WATCHING: AtomicBool = AtomicBool::new(false);
+    static BACKOFF_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
+
+    const FAIL_BACKOFF_MS: u64 = 30_000;
+    const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
+    fn cached() -> (bool, bool, bool) {
+        *CACHE.lock().unwrap_or_else(|err| err.into_inner())
+    }
+
+    install_route_watch(&WATCHING);
+    let now = unix_ms_route();
+    if now < ROUTE_QUIET_UNTIL_MS.load(Ordering::Relaxed)
+        || now < BACKOFF_UNTIL_MS.load(Ordering::Relaxed)
+    {
+        return cached();
+    }
+
+    match probe_child(PROBE_TIMEOUT) {
+        Some(flags) => {
+            *CACHE.lock().unwrap_or_else(|err| err.into_inner()) = flags;
+            flags
+        }
+        None => {
+            BACKOFF_UNTIL_MS.store(now.saturating_add(FAIL_BACKOFF_MS), Ordering::Relaxed);
+            cached()
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn install_route_watch(watching: &std::sync::atomic::AtomicBool) {
+    use std::sync::atomic::Ordering;
+    if watching.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    #[link(name = "CoreAudio", kind = "framework")]
+    extern "C" {
+        fn AudioObjectAddPropertyListener(
+            id: u32,
+            address: *const AudioAddress,
+            listener: extern "C" fn(u32, u32, *const AudioAddress, *mut std::ffi::c_void) -> i32,
+            client: *mut std::ffi::c_void,
+        ) -> i32;
+    }
+    unsafe {
+        for selector in [fourcc(b"dOut"), fourcc(b"dIn "), fourcc(b"dev#")] {
+            let address = AudioAddress {
+                selector,
+                scope: fourcc(b"glob"),
+                element: 0,
+            };
+            let _ =
+                AudioObjectAddPropertyListener(1, &address, on_route_change, std::ptr::null_mut());
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+static QUIET_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(5_000);
+
+#[cfg(target_os = "macos")]
+static ROUTE_QUIET_UNTIL_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(target_os = "macos")]
+extern "C" fn on_route_change(
+    _id: u32,
+    _count: u32,
+    _addresses: *const AudioAddress,
+    _client: *mut std::ffi::c_void,
+) -> i32 {
+    use std::sync::atomic::Ordering;
+    let until = unix_ms_route().saturating_add(QUIET_MS.load(Ordering::Relaxed));
+    ROUTE_QUIET_UNTIL_MS.fetch_max(until, Ordering::Relaxed);
+    0
+}
+
+#[cfg(target_os = "macos")]
+fn unix_ms_route() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+#[cfg(target_os = "macos")]
+fn probe_child(timeout: std::time::Duration) -> Option<(bool, bool, bool)> {
+    use std::io::Read;
+    let exe = std::env::current_exe().ok()?;
+    let mut child = std::process::Command::new(exe)
+        .arg("--status-probe")
+        .env("TAP_STATUS_PROBE", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return None;
+                }
+                let mut stdout = child.stdout.take()?;
+                let mut text = String::new();
+                stdout.read_to_string(&mut text).ok()?;
+                return parse_probe(&text);
+            }
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Err(_) => return None,
+        }
+    }
+}
+
+/// A fault in the helper should exit it, not file a "Tap quit unexpectedly" report.
+#[cfg(target_os = "macos")]
+fn disarm_crash_reporter() {
+    const EXC_MASK: u32 = (1 << 1) | (1 << 2) | (1 << 3) | (1 << 6) | (1 << 10) | (1 << 12);
+    extern "C" {
+        static mach_task_self_: u32;
+        fn task_set_exception_ports(
+            task: u32,
+            mask: u32,
+            new_port: u32,
+            behavior: i32,
+            flavor: i32,
+        ) -> i32;
+        fn signal(sig: i32, handler: extern "C" fn(i32)) -> usize;
+        fn _exit(code: i32) -> !;
+    }
+    extern "C" fn fault_exit(_sig: i32) {
+        unsafe { _exit(2) }
+    }
+    unsafe {
+        let _ = task_set_exception_ports(mach_task_self_, EXC_MASK, 0, 1, 6);
+        // SIGSEGV, SIGBUS, SIGILL, SIGTRAP, SIGABRT.
+        for sig in [11, 10, 4, 5, 6] {
+            signal(sig, fault_exit);
+        }
+    }
+}
+
+fn parse_probe(text: &str) -> Option<(bool, bool, bool)> {
+    let mut parts = text.split_whitespace();
+    let camera = parse_bit(parts.next()?)?;
+    let mic = parse_bit(parts.next()?)?;
+    let headphones = parse_bit(parts.next()?)?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((camera, mic, headphones))
+}
+
+fn parse_bit(text: &str) -> Option<bool> {
+    match text {
+        "1" | "true" => Some(true),
+        "0" | "false" => Some(false),
+        _ => None,
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -412,5 +604,14 @@ mod tests {
     fn idle_then_online() {
         assert_eq!(pick_status(false, false, false, true), "Away");
         assert_eq!(pick_status(false, false, false, false), "Online");
+    }
+
+    #[test]
+    fn probe_line_is_three_bits() {
+        assert_eq!(super::parse_probe("1 0 1"), Some((true, false, true)));
+        assert_eq!(super::parse_probe("0 0 0\n"), Some((false, false, false)));
+        assert_eq!(super::parse_probe("1 0"), None);
+        assert_eq!(super::parse_probe("2 0 0"), None);
+        assert_eq!(super::parse_probe("1 0 1 extra"), None);
     }
 }

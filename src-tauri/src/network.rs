@@ -1,6 +1,7 @@
 use crate::avatar;
 use crate::discovery::{
-    discover_tailscale_peers, manual_peer_records, merge_peer_maps, peer_list_from_map,
+    addresses_for_peer, manual_peer_records, merge_peer_maps, peer_list_from_map, sender_is_hidden,
+    tailscale_targets,
 };
 use crate::focus;
 use crate::overlay::sync_overlay_windows;
@@ -14,11 +15,13 @@ use crate::settings::{color_for_peer, effective_dnd, is_tailnet_ip, team_key_byt
 use crate::status;
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use parking_lot::Mutex;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr, TcpListener, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::{Condvar, Mutex as StdMutex};
 use std::thread;
+use std::time::SystemTime;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
@@ -57,6 +60,7 @@ pub struct NetworkRuntime {
     settings: Arc<Mutex<Settings>>,
     peers: Arc<Mutex<HashMap<String, PeerRecord>>>,
     roster: Arc<Mutex<RosterSync>>,
+    discovery: Arc<Discovery>,
 }
 
 impl NetworkRuntime {
@@ -71,6 +75,7 @@ impl NetworkRuntime {
         let hold_addrs = Arc::new(Mutex::new(Vec::new()));
         let replay: Arc<Mutex<ReplayGuard>> = Arc::new(Mutex::new(ReplayGuard::default()));
         let roster = Arc::new(Mutex::new(RosterSync::default()));
+        let discovery = Arc::new(Discovery::new());
 
         spawn_receiver(
             app.clone(),
@@ -86,6 +91,7 @@ impl NetworkRuntime {
             settings.clone(),
             peers.clone(),
             roster.clone(),
+            discovery.clone(),
             stop.clone(),
         );
         spawn_hold_sender(
@@ -117,12 +123,24 @@ impl NetworkRuntime {
             settings,
             peers,
             roster,
+            discovery,
         }
+    }
+
+    pub fn request_refresh(&self) {
+        let mut force = self.discovery.force.lock().expect("discovery lock");
+        *force = true;
+        self.discovery.wake.notify_one();
+    }
+
+    pub fn refreshed_at(&self) -> Option<u64> {
+        *self.discovery.refreshed_at.lock().expect("discovery lock")
     }
 
     pub fn stop(&self) {
         send_goodbye(&self.settings, &self.peers, &self.roster);
         self.stop.store(true, Ordering::SeqCst);
+        self.discovery.wake.notify_one();
     }
 
     pub fn begin_hold(&self, peer_id: &str, addrs: Vec<SocketAddr>) {
@@ -244,6 +262,7 @@ fn apply_inbound(
         .get(&msg.sender_id)
         .copied()
         .unwrap_or(false)
+        || sender_is_hidden(cfg, peers, &msg.sender_id, src_ip)
     {
         return InboundEffect::Ignored;
     }
@@ -284,7 +303,6 @@ fn apply_inbound(
                 }],
             );
             roster.gone.remove(&sender_id);
-            maybe_fetch_avatar(app, cfg, &sender_id, &avatar_hash, src_ip);
             InboundEffect::PeersChanged
         }
         MessageKind::Busy => InboundEffect::PeerBusy(msg.sender_id),
@@ -509,7 +527,12 @@ fn roster_members(
         members.push(RosterMember {
             id: peer.id,
             name: peer.name,
-            addrs: peer.addrs.iter().take(4).map(|addr| addr.to_string()).collect(),
+            addrs: peer
+                .addrs
+                .iter()
+                .take(4)
+                .map(|addr| addr.to_string())
+                .collect(),
             gone: false,
         });
     }
@@ -570,7 +593,9 @@ fn maybe_publish_roster(
     let peer_map = peers.lock().clone();
     let members = {
         let mut roster = roster.lock();
-        roster.gone.retain(|_, at| at.elapsed() < ROSTER_TOMBSTONE_TTL);
+        roster
+            .gone
+            .retain(|_, at| at.elapsed() < ROSTER_TOMBSTONE_TTL);
         let members = roster_members(cfg, &peer_map, &roster.gone);
         let signature = serde_json::to_string(&members).unwrap_or_default();
         if !force && signature == roster.published {
@@ -615,7 +640,10 @@ fn handle_inbound(
         let mut peers_guard = peers.lock();
         let mut replay_guard = replay.lock();
         let mut roster_guard = roster.lock();
-        apply_inbound(
+        let kind = msg.kind;
+        let sender_id = msg.sender_id.clone();
+        let avatar_hash = msg.avatar_hash.clone();
+        let effect = apply_inbound(
             &cfg,
             &mut overlay_guard,
             &mut peers_guard,
@@ -624,7 +652,19 @@ fn handle_inbound(
             msg,
             src_ip,
             Some(app),
-        )
+        );
+        if matches!(kind, MessageKind::Presence | MessageKind::Start) {
+            maybe_fetch_avatar(
+                app,
+                settings,
+                overlay,
+                &cfg,
+                &sender_id,
+                &avatar_hash,
+                src_ip,
+            );
+        }
+        effect
     };
     match effect {
         InboundEffect::Ignored => {}
@@ -642,7 +682,9 @@ fn handle_inbound(
 }
 
 fn maybe_fetch_avatar(
-    app: Option<&AppHandle>,
+    app: &AppHandle,
+    settings: &Arc<Mutex<Settings>>,
+    overlay: &Arc<Mutex<OverlayStateMachine>>,
     cfg: &Settings,
     id: &str,
     hash: &str,
@@ -660,7 +702,9 @@ fn maybe_fetch_avatar(
     let addr = SocketAddr::new(src_ip, cfg.listen_port);
     let id = id.to_string();
     let hash = hash.to_string();
-    let app = app.cloned();
+    let app = app.clone();
+    let settings = settings.clone();
+    let overlay = overlay.clone();
     thread::spawn(move || {
         let Some(bytes) = avatar::fetch(addr, &key) else {
             return;
@@ -668,13 +712,24 @@ fn maybe_fetch_avatar(
         if avatar::hash_of(&bytes) != hash {
             return;
         }
-        if avatar::write_cache(&id, &hash, &bytes).is_ok() {
-            if let Some(app) = app {
-                let _ = app.emit(
-                    "avatar-updated",
-                    serde_json::json!({ "id": id, "hash": hash }),
-                );
+        if avatar::write_cache(&id, &hash, &bytes).is_err() {
+            return;
+        }
+        let _ = app.emit(
+            "avatar-updated",
+            serde_json::json!({ "id": id, "hash": hash }),
+        );
+        let snapshot = {
+            let overlay = overlay.lock();
+            match overlay.snapshot() {
+                OverlaySnapshot::Visible(active) if active.sender_id == id => {
+                    Some(overlay.snapshot())
+                }
+                _ => None,
             }
+        };
+        if let Some(snapshot) = snapshot {
+            emit_overlay(&app, &settings, snapshot);
         }
     });
 }
@@ -717,6 +772,9 @@ fn spawn_avatar_server(settings: Arc<Mutex<Settings>>, stop: Arc<AtomicBool>) {
                 Ok((stream, _)) => {
                     let key = team_key_bytes(&settings.lock());
                     if let Some(key) = key {
+                        // Accepted sockets inherit the listener's nonblocking
+                        // flag. A WouldBlock read then drops the photo request.
+                        let _ = stream.set_nonblocking(false);
                         avatar::handle_connection(stream, &key);
                     }
                 }
@@ -808,14 +866,36 @@ pub fn show_style_preview(
     });
 }
 
+struct Discovery {
+    force: StdMutex<bool>,
+    wake: Condvar,
+    refreshed_at: StdMutex<Option<u64>>,
+}
+
+impl Discovery {
+    fn new() -> Self {
+        Self {
+            force: StdMutex::new(false),
+            wake: Condvar::new(),
+            refreshed_at: StdMutex::new(None),
+        }
+    }
+}
+
+const DISCOVERY_INTERVAL: Duration = Duration::from_secs(20);
+const DISCOVERY_WATCH: Duration = Duration::from_secs(5);
+
 fn spawn_presence(
     app: AppHandle,
     settings: Arc<Mutex<Settings>>,
     peers: Arc<Mutex<HashMap<String, PeerRecord>>>,
     roster: Arc<Mutex<RosterSync>>,
+    discovery: Arc<Discovery>,
     stop: Arc<AtomicBool>,
 ) {
     thread::spawn(move || {
+        let mut seen_targets = BTreeSet::new();
+        let mut last_ping = Instant::now() - DISCOVERY_INTERVAL;
         while !stop.load(Ordering::SeqCst) {
             let focused = focus::refresh_system_focus();
             let cfg = {
@@ -833,22 +913,29 @@ fn spawn_presence(
             {
                 let manual = manual_peer_records(&cfg.manual_peers, cfg.listen_port);
                 let mut map = peers.lock();
+                // A tailnet machine is not a person until it answers with the team key.
+                map.retain(|_, peer| peer.source != PeerSource::Tailscale);
                 *map = merge_peer_maps(std::mem::take(&mut *map), manual);
             }
-            if let Some(key) = team_key_bytes(&cfg) {
-                if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
-                    let mut msg = new_outgoing(
-                        MessageKind::Presence,
-                        &stable_sender_id(&cfg.display_name),
-                        &cfg.display_name,
-                        &status::current_status(),
-                        &avatar::current_hash(),
-                    );
-                    sign_message(&key, &mut msg);
-                    if let Ok(data) = serde_json::to_vec(&msg) {
-                        broadcast(&socket, &data, cfg.listen_port);
-                    }
-                }
+            let tailnet = tailscale_targets(cfg.listen_port);
+            let target_set: BTreeSet<SocketAddr> = tailnet.iter().copied().collect();
+            let joined = target_set != seen_targets;
+            let due = last_ping.elapsed() >= DISCOVERY_INTERVAL;
+            let forced = {
+                let mut flag = discovery.force.lock().expect("discovery lock");
+                let was = *flag;
+                *flag = false;
+                was
+            };
+            if team_key_bytes(&cfg).is_some() && (joined || due || forced) {
+                send_presence(&cfg, &peers, tailnet);
+                last_ping = Instant::now();
+                seen_targets = target_set;
+                let at = unix_millis();
+                *discovery.refreshed_at.lock().expect("discovery lock") = Some(at);
+                let _ = app.emit("discovery-refreshed", at);
+            }
+            if team_key_bytes(&cfg).is_some() {
                 let list = peer_list_from_map(&peers.lock(), &cfg);
                 let _ = app.emit("peers-updated", list);
                 let force = {
@@ -861,9 +948,74 @@ fn spawn_presence(
                 };
                 maybe_publish_roster(&cfg, &peers, &roster, force);
             }
-            thread::sleep(Duration::from_secs(5));
+            let guard = discovery.force.lock().expect("discovery lock");
+            if !*guard && !stop.load(Ordering::SeqCst) {
+                let _ = discovery
+                    .wake
+                    .wait_timeout(guard, DISCOVERY_WATCH)
+                    .expect("discovery lock");
+            }
         }
     });
+}
+
+fn send_presence(
+    cfg: &Settings,
+    peers: &Arc<Mutex<HashMap<String, PeerRecord>>>,
+    tailnet: Vec<SocketAddr>,
+) {
+    let Some(key) = team_key_bytes(cfg) else {
+        return;
+    };
+    let Ok(socket) = UdpSocket::bind("0.0.0.0:0") else {
+        return;
+    };
+    let mut msg = new_outgoing(
+        MessageKind::Presence,
+        &stable_sender_id(&cfg.display_name),
+        &cfg.display_name,
+        &status::current_status(),
+        &avatar::current_hash(),
+    );
+    sign_message(&key, &mut msg);
+    let Ok(data) = serde_json::to_vec(&msg) else {
+        return;
+    };
+    if !cfg.tailnet_only {
+        broadcast(&socket, &data, cfg.listen_port);
+    }
+    let targets = {
+        let known = peers.lock();
+        presence_targets(cfg, &known, tailnet)
+    };
+    for addr in targets {
+        let _ = socket.send_to(&data, addr);
+    }
+}
+
+fn unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn presence_targets(
+    cfg: &Settings,
+    peers: &HashMap<String, PeerRecord>,
+    mut targets: Vec<SocketAddr>,
+) -> Vec<SocketAddr> {
+    for peer in peers.values() {
+        for addr in &peer.addrs {
+            if cfg.tailnet_only && !is_tailnet_ip(&addr.ip()) {
+                continue;
+            }
+            if !targets.contains(addr) {
+                targets.push(*addr);
+            }
+        }
+    }
+    targets
 }
 
 fn broadcast(socket: &UdpSocket, data: &[u8], port: u16) {
@@ -917,7 +1069,7 @@ fn spawn_hold_sender(
                     &stable_sender_id(&cfg.display_name),
                     &cfg.display_name,
                     "",
-                    "",
+                    &avatar::current_hash(),
                 );
                 sign_message(&key, &mut msg);
                 if let Ok(data) = serde_json::to_vec(&msg) {
@@ -1024,7 +1176,8 @@ fn spawn_mdns(
                                 }],
                             );
                             drop(map);
-                            let _ = app.emit("peers-updated", peer_list_from_map(&peers.lock(), &cfg));
+                            let _ =
+                                app.emit("peers-updated", peer_list_from_map(&peers.lock(), &cfg));
                             maybe_publish_roster(&cfg, &peers, &roster, false);
                         }
                     }
@@ -1047,11 +1200,10 @@ fn spawn_tailscale_poll(
     thread::spawn(move || {
         while !stop.load(Ordering::SeqCst) {
             let cfg = settings.lock().clone();
-            let ts = discover_tailscale_peers(cfg.listen_port);
             let manual = manual_peer_records(&cfg.manual_peers, cfg.listen_port);
             let list = {
                 let mut map = peers.lock();
-                *map = merge_peer_maps(map.clone(), ts);
+                map.retain(|_, peer| peer.source != PeerSource::Tailscale);
                 *map = merge_peer_maps(map.clone(), manual);
                 peer_list_from_map(&map, &cfg)
             };
@@ -1076,10 +1228,7 @@ pub fn stable_sender_id(display_name: &str) -> String {
 }
 
 pub fn resolve_hold_addrs(peers: &HashMap<String, PeerRecord>, peer_id: &str) -> Vec<SocketAddr> {
-    peers
-        .get(peer_id)
-        .map(|p| p.addrs.clone())
-        .unwrap_or_default()
+    addresses_for_peer(peers, peer_id)
 }
 
 #[cfg(test)]
@@ -1211,14 +1360,24 @@ mod tests {
         assert!(matches!(overlay.snapshot(), OverlaySnapshot::Hidden));
     }
 
-    fn signed_roster(settings: &Settings, sender_id: &str, sender_name: &str, members: Vec<RosterMember>) -> TapMessage {
+    fn signed_roster(
+        settings: &Settings,
+        sender_id: &str,
+        sender_name: &str,
+        members: Vec<RosterMember>,
+    ) -> TapMessage {
         let mut msg = new_outgoing(MessageKind::Roster, sender_id, sender_name, "", "");
         msg.members = members;
         sign_message(&team_key_bytes(settings).expect("key"), &mut msg);
         msg
     }
 
-    fn apply_roster_msg(settings: &Settings, peers: &mut HashMap<String, PeerRecord>, roster: &mut RosterSync, msg: TapMessage) -> InboundEffect {
+    fn apply_roster_msg(
+        settings: &Settings,
+        peers: &mut HashMap<String, PeerRecord>,
+        roster: &mut RosterSync,
+        msg: TapMessage,
+    ) -> InboundEffect {
         let mut overlay = OverlayStateMachine::default();
         let mut replay = ReplayGuard::default();
         apply_inbound(
@@ -1267,7 +1426,9 @@ mod tests {
         assert!(peers.contains_key("ryan"));
 
         let announced = roster_members(&settings, &peers, &roster.gone);
-        assert!(announced.iter().any(|member| member.id == "cole" && !member.gone));
+        assert!(announced
+            .iter()
+            .any(|member| member.id == "cole" && !member.gone));
 
         let effect = apply_roster_msg(
             &settings,

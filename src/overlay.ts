@@ -26,6 +26,7 @@ else bootTheme();
 
 let chimeEnabled = false;
 let shownKey = "";
+let generation = 0;
 let hideTimer = 0;
 
 function reducedMotion(): boolean {
@@ -43,22 +44,61 @@ function esc(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-const GLOW_STYLES = new Set(["edge", "soft", "bold"]);
+const GLOW_STYLES = new Set(["line", "edge", "soft", "wash", "bold", "corners"]);
 
 function glowStyle(value: string | undefined): string {
   return value && GLOW_STYLES.has(value) ? value : "edge";
+}
+
+function motionMs(variable: string, fallback: number): number {
+  if (reducedMotion()) return 150;
+  const value = Number.parseFloat(getComputedStyle(document.body).getPropertyValue(variable));
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function freezePulse() {
+  const glow = root.querySelector<HTMLElement>(".glow");
+  if (!glow) return;
+  glow.style.setProperty("--pulse", getComputedStyle(glow, "::before").opacity);
+}
+
+function present(gen: number) {
+  const glow = root.querySelector<HTMLElement>(".glow");
+  const banner = root.querySelector<HTMLElement>(".banner");
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      if (gen !== generation) return;
+      glow?.classList.add("show");
+      banner?.classList.add("show");
+    });
+  });
+}
+
+function dismiss() {
+  const gen = generation;
+  freezePulse();
+  root.classList.add("leaving");
+  window.clearTimeout(hideTimer);
+  const glow = root.querySelector(".glow");
+  const finish = () => {
+    if (gen !== generation) return;
+    root.innerHTML = "";
+    root.classList.remove("leaving");
+  };
+  hideTimer = window.setTimeout(finish, motionMs("--glow-out", 640) + 80);
+  glow?.addEventListener("transitionend", (event) => {
+    if (event.propertyName !== "opacity" || event.target !== glow) return;
+    window.clearTimeout(hideTimer);
+    finish();
+  });
 }
 
 function render(payload: OverlayPayload) {
   if (!payload.visible) {
     if (!shownKey) return;
     shownKey = "";
-    root.classList.add("leaving");
-    window.clearTimeout(hideTimer);
-    hideTimer = window.setTimeout(() => {
-      root.innerHTML = "";
-      root.classList.remove("leaving");
-    }, reducedMotion() ? 150 : 500);
+    generation += 1;
+    dismiss();
     return;
   }
 
@@ -70,22 +110,24 @@ function render(payload: OverlayPayload) {
   if (key === shownKey) return;
   const becameVisible = shownKey === "";
   shownKey = key;
+  generation += 1;
   window.clearTimeout(hideTimer);
   root.classList.remove("leaving");
   const face = payload.avatar
     ? `<img src="${esc(payload.avatar)}" alt="" />`
     : esc(initials(name));
   root.innerHTML = `
-    <div class="glow show ${glow}" style="--glow:${esc(color)}"></div>
+    <div class="glow ${glow}" style="--glow:${esc(color)}"></div>
     ${
       banner
-        ? `<div class="banner show">
+        ? `<div class="banner">
       <span class="avatar" style="background:${esc(color)};--glow:${esc(color)}">${face}</span>
       <div><b>${esc(name)}</b> is tapping you</div>
     </div>`
         : ""
     }
   `;
+  present(generation);
   if (becameVisible && (payload.chimeEnabled ?? chimeEnabled)) playChime();
 }
 

@@ -8,6 +8,12 @@ use tauri::{PhysicalPosition, PhysicalSize};
 /// Enough for a laptop plus a full dock of external displays.
 const MAX_OVERLAYS: usize = 16;
 
+/// Keep the window up through the CSS fade. `--glow-out` is 640ms; the page
+/// finishes a little after that. Hiding sooner clips the exit.
+const GLOW_HIDE_AFTER: std::time::Duration = std::time::Duration::from_millis(720);
+
+static HIDE_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Latest glow payload. Page loads read this so a window that finishes
 /// loading after the one-shot emit still paints.
 static OVERLAY_PAYLOAD: Mutex<Option<serde_json::Value>> = Mutex::new(None);
@@ -97,9 +103,11 @@ fn apply_overlay_windows(app: &AppHandle, snapshot: &OverlaySnapshot, chrome: &O
             let _ = take_shown();
             forget_payload();
             emit_hidden(app);
-            hide_all(app);
+            // The page fades the glow. Hide the window only after that finishes.
+            schedule_hide_all(app);
         }
         OverlaySnapshot::Visible(active) => {
+            cancel_pending_hide();
             let payload = overlay_event_payload(active, chrome);
             remember_payload(&payload);
             remember_chrome(chrome);
@@ -448,6 +456,28 @@ fn hide_all(app: &AppHandle) {
             let _ = w.hide();
         }
     }
+}
+
+fn cancel_pending_hide() {
+    HIDE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn schedule_hide_all(app: &AppHandle) {
+    let token = HIDE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(GLOW_HIDE_AFTER);
+        if HIDE_GENERATION.load(std::sync::atomic::Ordering::SeqCst) != token {
+            return;
+        }
+        let app_for_hide = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            if HIDE_GENERATION.load(std::sync::atomic::Ordering::SeqCst) != token {
+                return;
+            }
+            hide_all(&app_for_hide);
+        });
+    });
 }
 
 /// AppKit point rect. Origin is the bottom-left of the primary display, y upward.

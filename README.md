@@ -11,10 +11,35 @@ Built with **Tauri v2** (Rust core + lightweight TypeScript UI).
 - **On release:** UDP `stop`.
 - **Receiver:** one transparent, always-on-top overlay per display (click-through, no focus steal). If heartbeats stop for ~2s, the overlay clears itself.
 - **Transport:** peer-to-peer UDP on LAN or Tailscale; no central server.
-- **Discovery:** mDNS (`_tap._udp.local.`), manual peers, and `tailscale status --json` when Tailscale is installed.
+- **Discovery:** same team key on the same Tailscale tailnet. Tap says hello to each online machine and shows the ones that answer. On a local network it also uses mDNS. A typed host is only a fallback.
 - **Auth:** HMAC-SHA256 with a shared team key, timestamp skew + nonce replay protection. Optional **Tailnet only** mode (100.64.0.0/10).
 
 Default UDP port: **37561**.
+
+## Keyboard
+
+Letter keys are not global. They only work while the team list is open.
+
+1. Settings → Team members: focus the key box on a person and press one letter or number. Backspace clears it. Two people cannot share a key.
+2. Open the list with a shortcut, then hold a teammate's key. Releasing stops the tap. Escape closes the list.
+
+Tap has to be running (it is a menu-bar app).
+
+### macOS
+
+In Raycast, add the `raycast` folder in this repo as a Script Command directory. Assign **Open Tap team** a hotkey (Hyper plus whatever key you want). The script is silent: it runs `open tap://keys` and does not leave Raycast on screen. The first launch of a build registers the `tap://` link.
+
+### Linux
+
+Settings → App → **Open team list**. The first run uses **Ctrl+Alt+Shift+T**. Click it and press a new chord to change it. Backspace while it is listening clears it.
+
+On GNOME that chord is saved as a custom keyboard shortcut, which works on Wayland. On X11, Tap grabs the chord itself. On other Wayland desktops, add a shortcut in the system keyboard settings that runs:
+
+```bash
+xdg-open tap://keys
+```
+
+`linux/open-team.sh` is that same command.
 
 ## Install
 
@@ -51,8 +76,8 @@ Install tray dependencies if needed: `libayatana-appindicator3-1`, `libwebkit2gt
 
 1. Open Tap. The first launch creates a **team key** and shows it on the Peers tab. Copy that same value into **Settings → Team key** on every other machine.
 2. Set a recognizable **Display name** on each machine.
-3. **Optional Tailscale:** install Tailscale on both machines, log into the same tailnet. Tap reads peers from `tailscale status --json`. You can add manual peers like `Alex@100.64.0.5` in Settings.
-4. Enable **Accept only Tailscale IPs** if you want to ignore non-tailnet senders on mixed networks. Turn that off before using **Preview on this Mac**.
+3. Install Tailscale on each machine and log into the same tailnet. Within a few seconds, everyone running Tap with this team key shows up. You do not need their IP.
+4. **Tailscale only** is on by default, so Tap ignores people who are not on the tailnet. Turn it off to also find people on the local network, and before using **Preview on this Mac**.
 
 Per-person **mute/allow** lists live in `~/.config/tap/settings.json` (`muteSenders` / `allowSenders` maps keyed by sender id) for v1.
 
@@ -68,7 +93,7 @@ That uses the real signed UDP path, sent to this machine. It does not check disc
 
 1. Build or install Tap on **Machine A** and **Machine B** (same team key).
 2. On both: open tray → **Settings** → set display names, team key, matching sender color optional → Save.
-3. Wait a few seconds for mDNS/Tailscale discovery, or add manual peer `Name@ip` on the sender.
+3. Wait a few seconds. Both machines need the same team key and the same tailnet.
 4. On **Machine A**, open the popover and **press-and-hold** Machine B's row.
 5. On **Machine B**, confirm the border + banner on all monitors; release on A and confirm it disappears.
 6. Test safety: kill Tap on A while holding — B's overlay should clear within ~2s.
