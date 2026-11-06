@@ -87,6 +87,7 @@ function dismiss() {
   };
   hideTimer = window.setTimeout(finish, motionMs("--glow-out", 640) + 80);
   glow?.addEventListener("transitionend", (event) => {
+    if (!(event instanceof TransitionEvent)) return;
     if (event.propertyName !== "opacity" || event.target !== glow) return;
     window.clearTimeout(hideTimer);
     finish();
