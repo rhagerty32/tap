@@ -20,7 +20,7 @@ jobs:
             args: --config src-tauri/tauri.release.conf.json
           - os: macos-latest
             target: macos
-            args: --target aarch64-apple-darwin --config src-tauri/tauri.release.conf.json
+            args: --target aarch64-apple-darwin --config src-tauri/tauri.release.macos.conf.json
     runs-on: ${{ matrix.os }}
     env:
       APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
