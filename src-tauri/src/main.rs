@@ -11,7 +11,7 @@ fn main() {
         tap_lib::run_status_probe();
         #[cfg(not(target_os = "macos"))]
         {
-            println!("{}", tap_lib::status::current_status());
+            println!("{}", tap_lib::status_probe_line());
             return;
         }
     }

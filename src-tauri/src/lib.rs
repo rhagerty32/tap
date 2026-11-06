@@ -1511,6 +1511,12 @@ pub fn run_status_probe() -> ! {
     status::run_probe();
 }
 
+/// Presence line for the in-process probe on Linux and Windows.
+#[cfg(not(target_os = "macos"))]
+pub fn status_probe_line() -> String {
+    status::current_status()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let settings_file_existed = settings_path().exists();
