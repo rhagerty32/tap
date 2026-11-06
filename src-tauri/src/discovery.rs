@@ -1,5 +1,5 @@
 use crate::peer::{PeerRecord, PeerSource};
-use crate::settings::Settings;
+use crate::settings::{color_for_peer, Settings};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -7,7 +7,10 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 pub fn discover_tailscale_peers(port: u16) -> Vec<PeerRecord> {
-    let output = Command::new("tailscale").arg("status").arg("--json").output();
+    let output = Command::new("tailscale")
+        .arg("status")
+        .arg("--json")
+        .output();
     let Ok(output) = output else {
         return Vec::new();
     };
@@ -44,6 +47,9 @@ pub fn discover_tailscale_peers(port: u16) -> Vec<PeerRecord> {
                 addrs,
                 source: PeerSource::Tailscale,
                 last_seen: Instant::now(),
+                status: String::new(),
+                avatar_hash: String::new(),
+                heard_directly: false,
             });
         }
     }
@@ -78,7 +84,26 @@ fn parse_manual_peer(entry: &str, port: u16) -> Option<PeerRecord> {
         addrs: vec![addr],
         source: PeerSource::Manual,
         last_seen: Instant::now(),
+        status: String::new(),
+        avatar_hash: String::new(),
+        heard_directly: true,
     })
+}
+
+fn preferred_source(current: PeerSource, incoming: PeerSource) -> PeerSource {
+    fn rank(source: PeerSource) -> u8 {
+        match source {
+            PeerSource::Tailscale => 0,
+            PeerSource::Team => 1,
+            PeerSource::Mdns => 2,
+            PeerSource::Manual => 3,
+        }
+    }
+    if rank(incoming) >= rank(current) {
+        incoming
+    } else {
+        current
+    }
 }
 
 pub fn merge_peer_maps(
@@ -86,8 +111,7 @@ pub fn merge_peer_maps(
     incoming: Vec<PeerRecord>,
 ) -> HashMap<String, PeerRecord> {
     for peer in incoming {
-        base
-            .entry(peer.id.clone())
+        base.entry(peer.id.clone())
             .and_modify(|existing| {
                 existing.name = peer.name.clone();
                 for addr in &peer.addrs {
@@ -95,7 +119,17 @@ pub fn merge_peer_maps(
                         existing.addrs.push(*addr);
                     }
                 }
-                existing.last_seen = Instant::now();
+                if peer.heard_directly {
+                    existing.last_seen = Instant::now();
+                    existing.heard_directly = true;
+                }
+                existing.source = preferred_source(existing.source, peer.source);
+                if !peer.status.is_empty() {
+                    existing.status = peer.status.clone();
+                }
+                if !peer.avatar_hash.is_empty() {
+                    existing.avatar_hash = peer.avatar_hash.clone();
+                }
             })
             .or_insert(peer);
     }
@@ -104,16 +138,23 @@ pub fn merge_peer_maps(
 
 use crate::network::stable_sender_id;
 
-pub fn peer_list_from_map(map: &HashMap<String, PeerRecord>, settings: &Settings) -> Vec<crate::peer::PeerInfo> {
+pub fn peer_list_from_map(
+    map: &HashMap<String, PeerRecord>,
+    settings: &Settings,
+) -> Vec<crate::peer::PeerInfo> {
     let self_id = stable_sender_id(&settings.display_name);
     map.values()
         .filter(|p| p.id != self_id)
         .map(|p| {
             let online = match p.source {
                 PeerSource::Manual | PeerSource::Tailscale => true,
-                _ => p.last_seen.elapsed() < Duration::from_secs(20),
+                // Introductions stay visible while the news is still spreading.
+                PeerSource::Team => p.last_seen.elapsed() < Duration::from_secs(70),
+                PeerSource::Mdns => p.last_seen.elapsed() < Duration::from_secs(20),
             };
-            p.to_info(online)
+            let mut info = p.to_info(online);
+            info.color = color_for_peer(settings, &p.id);
+            info
         })
         .collect()
 }

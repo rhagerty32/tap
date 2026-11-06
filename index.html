@@ -4,6 +4,12 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Tap</title>
+    <script>
+      try {
+        var tapTheme = localStorage.getItem("tap-theme");
+        if (tapTheme === "light" || tapTheme === "dark") document.documentElement.dataset.theme = tapTheme;
+      } catch (e) {}
+    </script>
   </head>
   <body class="app">
     <div id="app"></div>

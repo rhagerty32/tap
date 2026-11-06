@@ -2,6 +2,7 @@ import "@fontsource/inter/400.css";
 import "@fontsource/inter/500.css";
 import "@fontsource/inter/600.css";
 import "./styles.css";
+import { bootTheme } from "./theme";
 import { listen } from "@tauri-apps/api/event";
 
 const root = document.querySelector<HTMLDivElement>("#overlay-root")!;
@@ -12,12 +13,16 @@ type OverlayPayload = {
   senderName?: string;
   color?: string;
   chimeEnabled?: boolean;
+  glowStyle?: string;
+  showBanner?: boolean;
+  avatar?: string | null;
 };
 
 type Preview = { senderName: string; color?: string };
 
 const preview = (window as Window & { __TAP_PREVIEW__?: Preview }).__TAP_PREVIEW__;
 if (preview) document.body.classList.add("preview");
+else bootTheme();
 
 let chimeEnabled = false;
 let shownKey = "";
@@ -38,6 +43,12 @@ function esc(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+const GLOW_STYLES = new Set(["edge", "soft", "bold"]);
+
+function glowStyle(value: string | undefined): string {
+  return value && GLOW_STYLES.has(value) ? value : "edge";
+}
+
 function render(payload: OverlayPayload) {
   if (!payload.visible) {
     if (!shownKey) return;
@@ -53,18 +64,27 @@ function render(payload: OverlayPayload) {
 
   const name = payload.senderName ?? "Someone";
   const color = payload.color || "#F86E51";
-  const key = `${name}|${color}`;
+  const glow = glowStyle(payload.glowStyle);
+  const banner = payload.showBanner !== false;
+  const key = `${name}|${color}|${glow}|${banner}|${payload.avatar || ""}`;
   if (key === shownKey) return;
   const becameVisible = shownKey === "";
   shownKey = key;
   window.clearTimeout(hideTimer);
   root.classList.remove("leaving");
+  const face = payload.avatar
+    ? `<img src="${esc(payload.avatar)}" alt="" />`
+    : esc(initials(name));
   root.innerHTML = `
-    <div class="glow show" style="--glow:${esc(color)}"></div>
-    <div class="banner show">
-      <span class="avatar" style="background:${esc(color)};--glow:${esc(color)}">${esc(initials(name))}</span>
+    <div class="glow show ${glow}" style="--glow:${esc(color)}"></div>
+    ${
+      banner
+        ? `<div class="banner show">
+      <span class="avatar" style="background:${esc(color)};--glow:${esc(color)}">${face}</span>
       <div><b>${esc(name)}</b> is tapping you</div>
-    </div>
+    </div>`
+        : ""
+    }
   `;
   if (becameVisible && (payload.chimeEnabled ?? chimeEnabled)) playChime();
 }

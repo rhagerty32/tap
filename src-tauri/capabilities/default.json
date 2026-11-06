@@ -11,6 +11,8 @@
     "core:tray:default",
     "core:menu:default",
     "opener:default",
-    "autostart:default"
+    "autostart:default",
+    "updater:default",
+    "process:allow-restart"
   ]
 }

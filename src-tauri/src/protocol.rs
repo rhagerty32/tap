@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
 
-pub const PROTOCOL_VERSION: u8 = 1;
+pub const PROTOCOL_VERSION: u8 = 2;
 pub const MAX_CLOCK_SKEW: Duration = Duration::from_secs(30);
 pub const NONCE_TTL: Duration = Duration::from_secs(300);
 pub const MAX_NONCE_CACHE: usize = 4096;
@@ -22,6 +22,22 @@ pub enum MessageKind {
     Heartbeat,
     Stop,
     Presence,
+    /// Receiver is in do-not-disturb. Sent once in reply to Start.
+    Busy,
+    /// Current team. Members pass it on, so a join or a leave reaches everyone.
+    Roster,
+}
+
+/// One person on the signed team list.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RosterMember {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub addrs: Vec<String>,
+    /// This person left. Recipients remove them and pass the departure on.
+    #[serde(default)]
+    pub gone: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,10 +46,19 @@ pub struct TapMessage {
     pub kind: MessageKind,
     pub sender_id: String,
     pub sender_name: String,
+    /// Kept so older packets still parse. v2 does not sign it; color is chosen by the receiver.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default, rename = "avatarHash")]
+    pub avatar_hash: String,
     pub timestamp_ms: u64,
     pub nonce: String,
+    /// Present only on roster messages. Empty for every other kind, so those
+    /// signatures stay compatible with earlier builds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<RosterMember>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sig: Option<String>,
 }
@@ -65,37 +90,72 @@ fn kind_str(kind: MessageKind) -> &'static str {
         MessageKind::Heartbeat => "heartbeat",
         MessageKind::Stop => "stop",
         MessageKind::Presence => "presence",
+        MessageKind::Busy => "busy",
+        MessageKind::Roster => "roster",
     }
 }
 
+pub fn canonical_member_list(members: &[RosterMember]) -> String {
+    let mut members = members.to_vec();
+    for member in &mut members {
+        member.addrs.sort();
+        member.addrs.dedup();
+    }
+    members.sort_by(|a, b| a.id.cmp(&b.id).then(a.gone.cmp(&b.gone)));
+    serde_json::to_string(&members).unwrap_or_default()
+}
+
 pub fn canonical_payload(msg: &TapMessage) -> String {
-    let color = msg.color.as_deref().unwrap_or("");
-    format!(
-        "v{}|{}|{}|{}|{}|{}|{}",
+    let base = format!(
+        "v{}|{}|{}|{}|{}|{}|{}|{}",
         msg.v,
         kind_str(msg.kind),
         msg.sender_id,
         msg.sender_name,
-        color,
+        msg.status,
+        msg.avatar_hash,
         msg.timestamp_ms,
         msg.nonce
-    )
+    );
+    if msg.members.is_empty() {
+        base
+    } else {
+        format!("{base}|{}", canonical_member_list(&msg.members))
+    }
+}
+
+pub fn mac_b64(key: &[u8], payload: &str) -> String {
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC key length");
+    mac.update(payload.as_bytes());
+    B64.encode(mac.finalize().into_bytes())
+}
+
+pub fn mac_matches(key: &[u8], payload: &str, sig_b64: &str) -> bool {
+    let Ok(sig_bytes) = B64.decode(sig_b64) else {
+        return false;
+    };
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC key length");
+    mac.update(payload.as_bytes());
+    let expected = mac.finalize().into_bytes();
+    sig_bytes.len() == expected.len() && bool::from(sig_bytes.as_slice().ct_eq(expected.as_slice()))
 }
 
 pub fn sign_message(key: &[u8], msg: &mut TapMessage) {
-    let payload = canonical_payload(msg);
-    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC key length");
-    mac.update(payload.as_bytes());
-    let result = mac.finalize().into_bytes();
-    msg.sig = Some(B64.encode(result));
+    msg.sig = Some(mac_b64(key, &canonical_payload(msg)));
 }
 
-pub fn verify_message(key: &[u8], msg: &TapMessage, replay: &mut ReplayGuard) -> Result<(), VerifyError> {
+pub fn verify_message(
+    key: &[u8],
+    msg: &TapMessage,
+    replay: &mut ReplayGuard,
+) -> Result<(), VerifyError> {
     if msg.v != PROTOCOL_VERSION {
         return Err(VerifyError::UnsupportedVersion);
     }
     let sig_b64 = msg.sig.as_ref().ok_or(VerifyError::MissingSignature)?;
-    let sig_bytes = B64.decode(sig_b64).map_err(|_| VerifyError::InvalidSignature)?;
+    let sig_bytes = B64
+        .decode(sig_b64)
+        .map_err(|_| VerifyError::InvalidSignature)?;
 
     let payload = canonical_payload(msg);
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC key length");
@@ -146,15 +206,24 @@ impl ReplayGuard {
     }
 }
 
-pub fn new_outgoing(kind: MessageKind, sender_id: &str, sender_name: &str, color: Option<String>) -> TapMessage {
+pub fn new_outgoing(
+    kind: MessageKind,
+    sender_id: &str,
+    sender_name: &str,
+    status: &str,
+    avatar_hash: &str,
+) -> TapMessage {
     TapMessage {
         v: PROTOCOL_VERSION,
         kind,
         sender_id: sender_id.to_string(),
         sender_name: sender_name.to_string(),
-        color,
+        color: None,
+        status: status.to_string(),
+        avatar_hash: avatar_hash.to_string(),
         timestamp_ms: now_ms(),
         nonce: Uuid::new_v4().to_string(),
+        members: Vec::new(),
         sig: None,
     }
 }
@@ -169,7 +238,7 @@ mod tests {
 
     #[test]
     fn sign_and_verify_roundtrip() {
-        let mut msg = new_outgoing(MessageKind::Start, "alice", "Alice", Some("#ff5500".into()));
+        let mut msg = new_outgoing(MessageKind::Start, "alice", "Alice", "Headphones", "abc");
         sign_message(&key(), &mut msg);
         let mut guard = ReplayGuard::default();
         assert!(verify_message(&key(), &msg, &mut guard).is_ok());
@@ -177,7 +246,7 @@ mod tests {
 
     #[test]
     fn rejects_bad_signature() {
-        let mut msg = new_outgoing(MessageKind::Start, "alice", "Alice", Some("#ff5500".into()));
+        let mut msg = new_outgoing(MessageKind::Start, "alice", "Alice", "", "");
         sign_message(&key(), &mut msg);
         msg.sig = Some(B64.encode(b"tampered"));
         let mut guard = ReplayGuard::default();
@@ -189,7 +258,7 @@ mod tests {
 
     #[test]
     fn rejects_replay() {
-        let mut msg = new_outgoing(MessageKind::Heartbeat, "alice", "Alice", None);
+        let mut msg = new_outgoing(MessageKind::Heartbeat, "alice", "Alice", "", "");
         sign_message(&key(), &mut msg);
         let mut guard = ReplayGuard::default();
         assert!(verify_message(&key(), &msg, &mut guard).is_ok());
@@ -200,8 +269,29 @@ mod tests {
     }
 
     #[test]
+    fn roster_signature_covers_who_joined_and_who_left() {
+        let mut msg = new_outgoing(MessageKind::Roster, "ryan", "Ryan", "", "");
+        msg.members = vec![RosterMember {
+            id: "cole".into(),
+            name: "Cole".into(),
+            addrs: vec!["10.0.0.3:37561".into()],
+            gone: false,
+        }];
+        sign_message(&key(), &mut msg);
+        let mut guard = ReplayGuard::default();
+        assert!(verify_message(&key(), &msg, &mut guard).is_ok());
+
+        msg.members[0].gone = true;
+        let mut guard = ReplayGuard::default();
+        assert!(matches!(
+            verify_message(&key(), &msg, &mut guard),
+            Err(VerifyError::InvalidSignature)
+        ));
+    }
+
+    #[test]
     fn rejects_stale_timestamp() {
-        let mut msg = new_outgoing(MessageKind::Stop, "alice", "Alice", None);
+        let mut msg = new_outgoing(MessageKind::Stop, "alice", "Alice", "", "");
         msg.timestamp_ms = now_ms().saturating_sub(60_000);
         sign_message(&key(), &mut msg);
         let mut guard = ReplayGuard::default();

@@ -8,6 +8,8 @@ pub enum PeerSource {
     Mdns,
     Tailscale,
     Manual,
+    /// Learned from another member's team list.
+    Team,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,6 +22,11 @@ pub struct PeerInfo {
     pub source: PeerSource,
     /// Seconds since this peer was last seen. The popover uses it for "Away".
     pub seen_secs_ago: u64,
+    /// Automatic presence line: Headphones, On a call, In a meeting, Away, Online.
+    pub status: String,
+    pub avatar_hash: String,
+    /// Color this machine uses for the peer.
+    pub color: String,
 }
 
 #[derive(Debug, Clone)]
@@ -29,6 +36,10 @@ pub struct PeerRecord {
     pub addrs: Vec<SocketAddr>,
     pub source: PeerSource,
     pub last_seen: Instant,
+    pub status: String,
+    pub avatar_hash: String,
+    /// A packet from this person, not only a mention in someone else's list.
+    pub heard_directly: bool,
 }
 
 impl PeerRecord {
@@ -40,6 +51,9 @@ impl PeerRecord {
             online,
             source: self.source,
             seen_secs_ago: self.last_seen.elapsed().as_secs(),
+            status: self.status.clone(),
+            avatar_hash: self.avatar_hash.clone(),
+            color: String::new(),
         }
     }
 }

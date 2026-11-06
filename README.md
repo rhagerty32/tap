@@ -76,7 +76,7 @@ That uses the real signed UDP path, sent to this machine. It does not check disc
 
 | Platform | Tray / menu bar | Receiver overlay | Notes |
 |----------|-----------------|------------------|-------|
-| **macOS** (Intel & Apple Silicon) | Menu bar + popover | Transparent always-on-top webview windows per display; `setIgnoreCursorEvents`, high window level, collection behavior for all Spaces / fullscreen auxiliary | Best-effort non-activating panel behavior via NSWindow APIs. Notarization/signing when Apple secrets are configured in CI. |
+| **macOS** (Apple Silicon) | Menu bar + popover | Transparent always-on-top webview windows per display; `setIgnoreCursorEvents`, high window level, collection behavior for all Spaces / fullscreen auxiliary | Best-effort non-activating panel behavior via NSWindow APIs. Notarization/signing when Apple secrets are configured in CI. |
 | **Linux X11** | Ayatana app indicator | Transparent always-on-top undecorated windows; `set_ignore_cursor_events(true)` | Click-through works reliably on X11 sessions. |
 | **Linux Wayland (wlroots: Sway, Hyprland, etc.)** | App indicator (via XWayland or native) | Same GTK/WebKit windows; compositor-dependent stacking | wlr-layer-shell is **not** wired in v1; behavior varies by compositor. |
 | **Ubuntu / GNOME / Mutter (Wayland)** | Supported tray | Always-on-top transparent windows + ignored cursor events | Mutter has **no** wlr-layer-shell; this is the documented fallback (not a true layer-shell overlay). Stacking above full-screen apps may be inconsistent. |
@@ -100,14 +100,15 @@ Artifacts land in `src-tauri/target/release/bundle/`.
 
 ## Cut a release
 
-1. Bump `version` in `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml`.
-2. Commit and push a tag:
+1. Bump `version` in `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml` so it matches the tag (`v0.1.0` for version `0.1.0`).
+2. Commit and push a tag. That is what publishes; the workflow does not run on normal pushes.
    ```bash
    git tag v0.1.0
    git push origin v0.1.0
    ```
-3. The **Release** workflow builds `.dmg`, `.AppImage`, and `.deb`, and attaches them to the GitHub Release.
-4. Optional signing/notarization: set repository secrets `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`.
+3. The **Release** workflow builds an Apple Silicon `.dmg`, a Linux `.AppImage`, and a `.deb`, then attaches them to the GitHub Release along with `latest.json`.
+4. Settings → **Check for updates** downloads the next version for an app installed from the `.dmg` (dragged to Applications) or for the `.AppImage`. A `.deb` install is updated by installing the new package.
+5. Before the first tag, set the repository secret `TAURI_SIGNING_PRIVATE_KEY` to the contents of `~/.tauri/tap.key`. That private key stays off the repo. Optional Apple signing: `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`.
 
 ## Security notes
 
