@@ -72,7 +72,9 @@
     },
     "macOS": {
       "minimumSystemVersion": "11.0",
-      "infoPlist": "Info.plist"
+      "infoPlist": "Info.plist",
+      "signingIdentity": "-",
+      "hardenedRuntime": false
     },
     "shortDescription": "Press-and-hold attention signal for coworkers",
     "longDescription": "Tap lets you press-and-hold a coworker's name to show a click-through screen overlay on their machine while you hold."

@@ -22,9 +22,10 @@ Default UDP port: **37561**.
 
 1. Download the `.dmg` from a GitHub Release (tag `v*`), or build locally (see below).
 2. Open the DMG and drag **Tap** to Applications.
-3. **Unsigned builds:** if macOS blocks the app, right-click → Open, or run:
+3. macOS will say the app is damaged. That dialog is Gatekeeper, and right-click → Open does not get past it. Drag Tap to Applications, then run:
    ```bash
-   xattr -dr com.apple.quarantine /Applications/Tap.app
+   xattr -cr /Applications/Tap.app
+   open /Applications/Tap.app
    ```
 4. Grant **Local Network** access when prompted (required for mDNS/UDP).
 
