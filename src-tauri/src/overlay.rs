@@ -277,6 +277,7 @@ fn linux_monitor_name(monitor: &tauri::Monitor, index: usize) -> String {
     monitor
         .name()
         .filter(|name| !name.is_empty())
+        .cloned()
         .unwrap_or_else(|| format!("Display {}", index + 1))
 }
 
