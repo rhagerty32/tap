@@ -10,7 +10,10 @@ mod settings;
 mod status;
 
 use crate::peer::{PeerInfo, PeerRecord};
-use discovery::{hide_person, peer_list_from_map};
+use discovery::{
+    dedupe_manual_peers, hide_person, manual_peer_records, peer_list_from_map, reveal_manual_peers,
+    sync_manual_peers,
+};
 use network::{resolve_hold_addrs, stable_sender_id, NetworkRuntime};
 use overlay_state::OverlayStateMachine;
 use parking_lot::Mutex;
@@ -44,7 +47,7 @@ fn save_app_settings(
     state: State<AppState>,
     settings: Settings,
     app: AppHandle,
-) -> Result<(), String> {
+) -> Result<Settings, String> {
     let saved = {
         let mut current = state.settings.lock();
         let mut incoming = settings;
@@ -60,10 +63,24 @@ fn save_app_settings(
         incoming.glow_style = normalize_glow(&incoming.glow_style);
         incoming.overlay_screens = normalize_screens(&incoming.overlay_screens);
         incoming.theme = normalize_theme(&incoming.theme);
+        dedupe_manual_peers(&mut incoming.manual_peers);
+        {
+            let mut map = state.peers.lock();
+            let manual = manual_peer_records(&incoming.manual_peers, incoming.listen_port);
+            sync_manual_peers(&mut map, manual);
+            reveal_manual_peers(&mut incoming, &map);
+        }
         save_settings(&incoming)?;
         *current = incoming.clone();
         incoming
     };
+    let _ = app.emit(
+        "peers-updated",
+        peer_list_from_map(&state.peers.lock(), &saved),
+    );
+    if let Some(network) = state.network.lock().as_ref() {
+        network.request_refresh();
+    }
     configure_autostart(&app, saved.launch_at_login)?;
     apply_app_theme(&app, &saved.theme);
     let _ = app.emit("settings-changed", saved.clone());
@@ -71,7 +88,7 @@ fn save_app_settings(
         "dnd-changed",
         effective_dnd(&saved, focus::cached_system_focus()),
     );
-    Ok(())
+    Ok(saved)
 }
 
 #[tauri::command]

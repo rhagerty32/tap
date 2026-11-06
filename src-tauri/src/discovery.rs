@@ -1,15 +1,41 @@
 use crate::peer::{PeerRecord, PeerSource};
 use crate::settings::{canonical_color, color_for_peer, Settings};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
 /// Online machines on this tailnet. They are not teammates until one answers
 /// with the shared team key.
+/// `tailscale` is often missing from a menu-bar app's PATH. On macOS the
+/// working binary ships inside Tailscale.app and is not installed on PATH.
+fn tailscale_program() -> PathBuf {
+    let mut candidates = Vec::new();
+    if let Ok(path) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path) {
+            candidates.push(dir.join("tailscale"));
+            #[cfg(windows)]
+            candidates.push(dir.join("tailscale.exe"));
+        }
+    }
+    candidates.extend([
+        PathBuf::from("/Applications/Tailscale.app/Contents/MacOS/Tailscale"),
+        PathBuf::from("/usr/local/bin/tailscale"),
+        PathBuf::from("/opt/homebrew/bin/tailscale"),
+        PathBuf::from("/usr/bin/tailscale"),
+        #[cfg(windows)]
+        PathBuf::from(r"C:\Program Files\Tailscale\tailscale.exe"),
+    ]);
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| PathBuf::from("tailscale"))
+}
+
 pub fn tailscale_targets(port: u16) -> Vec<SocketAddr> {
-    let output = Command::new("tailscale")
+    let output = Command::new(tailscale_program())
         .arg("status")
         .arg("--json")
         .output();
@@ -57,6 +83,44 @@ fn preferred_tailscale_ip(ips: &[String]) -> Option<IpAddr> {
         .copied()
         .find(IpAddr::is_ipv4)
         .or_else(|| parsed.into_iter().next())
+}
+
+pub fn dedupe_manual_peers(entries: &mut Vec<String>) {
+    let mut seen = HashSet::new();
+    entries.retain(|entry| {
+        let key = entry.trim().to_ascii_lowercase();
+        if key.is_empty() {
+            return false;
+        }
+        seen.insert(key)
+    });
+}
+
+/// Drop manual rows the user removed, then merge the ones they kept.
+pub fn sync_manual_peers(map: &mut HashMap<String, PeerRecord>, manuals: Vec<PeerRecord>) {
+    let ids: HashSet<&str> = manuals.iter().map(|peer| peer.id.as_str()).collect();
+    map.retain(|_, peer| peer.source != PeerSource::Manual || ids.contains(peer.id.as_str()));
+    let owned = std::mem::take(map);
+    *map = merge_peer_maps(owned, manuals);
+}
+
+/// A typed host is an explicit "show this person", including after Remove.
+pub fn reveal_manual_peers(settings: &mut Settings, map: &HashMap<String, PeerRecord>) -> bool {
+    let manuals = manual_peer_records(&settings.manual_peers, settings.listen_port);
+    if manuals.is_empty() {
+        return false;
+    }
+    let before = settings.hidden_peers.len();
+    settings.hidden_peers.retain(|id| {
+        if manuals.iter().any(|manual| &manual.id == id) {
+            return false;
+        }
+        match map.get(id) {
+            Some(peer) => !manuals.iter().any(|manual| same_person(peer, manual)),
+            None => true,
+        }
+    });
+    before != settings.hidden_peers.len()
 }
 
 pub fn manual_peer_records(manual: &[String], port: u16) -> Vec<PeerRecord> {
@@ -222,6 +286,12 @@ pub fn sender_is_hidden(
     sender_id: &str,
     src_ip: IpAddr,
 ) -> bool {
+    let manuals = manual_peer_records(&settings.manual_peers, settings.listen_port);
+    if manuals.iter().any(|manual| {
+        manual.addrs.iter().any(|addr| addr.ip() == src_ip) || manual.id == sender_id
+    }) {
+        return false;
+    }
     if settings.hidden_peers.iter().any(|id| id == sender_id) {
         return true;
     }
@@ -240,6 +310,14 @@ pub fn sender_is_hidden(
 }
 
 fn group_hidden(peers: &[&PeerRecord], group: &[usize], settings: &Settings) -> bool {
+    let manuals = manual_peer_records(&settings.manual_peers, settings.listen_port);
+    if group.iter().any(|&index| {
+        manuals.iter().any(|manual| {
+            manual.id == peers[index].id || same_person(manual, peers[index])
+        })
+    }) {
+        return false;
+    }
     group.iter().any(|&index| {
         settings
             .hidden_peers
@@ -598,6 +676,40 @@ mod tests {
             &map,
             "app-dean",
             "100.64.0.2".parse().unwrap(),
+        ));
+    }
+
+    #[test]
+    fn typed_host_shows_again_after_it_was_removed() {
+        let mut map = HashMap::new();
+        map.insert(
+            "app-dean".into(),
+            record("app-dean", "Dean", "100.113.108.22", PeerSource::Mdns),
+        );
+        let mut settings = Settings::default();
+        settings.listen_port = 37561;
+        settings.hidden_peers.push("app-dean".into());
+        settings
+            .hidden_peers
+            .push("manual-Dean-100.113.108.22".into());
+        settings.manual_peers = vec![
+            "Dean@100.113.108.22".into(),
+            "Dean@100.113.108.22".into(),
+        ];
+        dedupe_manual_peers(&mut settings.manual_peers);
+        assert_eq!(settings.manual_peers.len(), 1);
+        assert!(reveal_manual_peers(&mut settings, &map));
+        assert!(settings.hidden_peers.is_empty());
+        let manual = manual_peer_records(&settings.manual_peers, settings.listen_port);
+        sync_manual_peers(&mut map, manual);
+        let list = peer_list_from_map(&map, &settings);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "Dean");
+        assert!(!sender_is_hidden(
+            &settings,
+            &map,
+            "app-dean",
+            "100.113.108.22".parse().unwrap(),
         ));
     }
 }

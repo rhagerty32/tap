@@ -389,14 +389,29 @@ async function assignKey(id: string, raw: string) {
   render();
 }
 
+function manualClaims(manuals: ManualEntry[], peer: TeamPeer): boolean {
+  return manuals.some(
+    (entry) => entry.id === peer.id || (peer.addresses ?? []).some((addr) => sameHost(entry.host, addr)),
+  );
+}
+
 function peopleRows(): PersonRow[] {
+  const seenManual = new Set<string>();
   const manuals = (settings?.manualPeers ?? [])
     .map((entry, index) => parseManual(entry, index))
-    .filter((entry): entry is ManualEntry => entry !== null);
+    .filter((entry): entry is ManualEntry => {
+      if (!entry) return false;
+      const key = `${entry.name}\0${entry.host}`.toLowerCase();
+      if (seenManual.has(key)) return false;
+      seenManual.add(key);
+      return true;
+    });
   const hidden = new Set(settings?.hiddenPeers ?? []);
   const used = new Set<number>();
   const byId = new Map(manuals.map((entry) => [entry.id, entry]));
-  const rows: PersonRow[] = peers.filter((peer) => !hidden.has(peer.id)).map((peer) => {
+  const rows: PersonRow[] = peers
+    .filter((peer) => !hidden.has(peer.id) || manualClaims(manuals, peer))
+    .map((peer) => {
     let manual = byId.get(peer.id);
     if (!manual) {
       manual = manuals.find(
@@ -415,7 +430,7 @@ function peopleRows(): PersonRow[] {
     };
   });
   for (const manual of manuals) {
-    if (used.has(manual.index) || hidden.has(manual.id)) continue;
+    if (used.has(manual.index)) continue;
     rows.push({
       id: manual.id,
       name: manual.name,
@@ -783,10 +798,20 @@ function render() {
   });
   add?.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
+      event.preventDefault();
       const value = add.value.trim();
       adding = false;
       addDraft = "";
-      if (value) settings!.manualPeers = [...settings!.manualPeers, value];
+      if (value) {
+        const key = value.toLowerCase();
+        if (!settings!.manualPeers.some((entry) => entry.trim().toLowerCase() === key)) {
+          settings!.manualPeers = [...settings!.manualPeers, value];
+        }
+        const parsed = parseManual(value, 0);
+        if (parsed) {
+          settings!.hiddenPeers = (settings!.hiddenPeers ?? []).filter((id) => id !== parsed.id);
+        }
+      }
       void persist();
       render();
     } else if (event.key === "Escape") {
@@ -1009,8 +1034,11 @@ async function checkForUpdates() {
 async function persist() {
   if (!settings || preview) return;
   try {
-    await invoke("save_app_settings", { settings });
+    const saved = await invoke<Settings>("save_app_settings", { settings });
+    settings.manualPeers = saved.manualPeers;
+    settings.hiddenPeers = saved.hiddenPeers;
     error = "";
+    if (tab === "team" && !sliding && !adding) render();
   } catch (err) {
     error = typeof err === "string" ? err : "Couldn't save settings.";
     render();

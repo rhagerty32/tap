@@ -1,6 +1,6 @@
 [package]
 name = "tap"
-version = "0.2.3"
+version = "0.2.4"
 description = "Press-and-hold to get a coworker's attention"
 authors = ["Tap Contributors"]
 edition = "2021"

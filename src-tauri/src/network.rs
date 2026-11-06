@@ -1,7 +1,7 @@
 use crate::avatar;
 use crate::discovery::{
-    addresses_for_peer, manual_peer_records, merge_peer_maps, peer_list_from_map, sender_is_hidden,
-    tailscale_targets,
+    addresses_for_peer, manual_peer_records, merge_peer_maps, peer_list_from_map,
+    reveal_manual_peers, sender_is_hidden, sync_manual_peers, tailscale_targets,
 };
 use crate::focus;
 use crate::overlay::sync_overlay_windows;
@@ -904,6 +904,13 @@ fn spawn_presence(
                     cfg.suppress_system_dnd = false;
                     let _ = crate::settings::save_settings(&cfg);
                 }
+                let mut map = peers.lock();
+                let manual = manual_peer_records(&cfg.manual_peers, cfg.listen_port);
+                sync_manual_peers(&mut map, manual);
+                if reveal_manual_peers(&mut cfg, &map) {
+                    let _ = crate::settings::save_settings(&cfg);
+                }
+                drop(map);
                 cfg.clone()
             };
             let dnd_bit = u8::from(effective_dnd(&cfg, focused));
@@ -911,11 +918,9 @@ fn spawn_presence(
                 let _ = app.emit("dnd-changed", dnd_bit == 1);
             }
             {
-                let manual = manual_peer_records(&cfg.manual_peers, cfg.listen_port);
                 let mut map = peers.lock();
                 // A tailnet machine is not a person until it answers with the team key.
                 map.retain(|_, peer| peer.source != PeerSource::Tailscale);
-                *map = merge_peer_maps(std::mem::take(&mut *map), manual);
             }
             let tailnet = tailscale_targets(cfg.listen_port);
             let target_set: BTreeSet<SocketAddr> = tailnet.iter().copied().collect();
@@ -1200,11 +1205,11 @@ fn spawn_tailscale_poll(
     thread::spawn(move || {
         while !stop.load(Ordering::SeqCst) {
             let cfg = settings.lock().clone();
-            let manual = manual_peer_records(&cfg.manual_peers, cfg.listen_port);
             let list = {
                 let mut map = peers.lock();
                 map.retain(|_, peer| peer.source != PeerSource::Tailscale);
-                *map = merge_peer_maps(map.clone(), manual);
+                let manual = manual_peer_records(&cfg.manual_peers, cfg.listen_port);
+                sync_manual_peers(&mut map, manual);
                 peer_list_from_map(&map, &cfg)
             };
             let _ = app.emit("peers-updated", list);
