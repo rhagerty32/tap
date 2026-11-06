@@ -74,7 +74,13 @@
       "minimumSystemVersion": "11.0",
       "infoPlist": "Info.plist",
       "signingIdentity": "-",
-      "hardenedRuntime": false
+      "hardenedRuntime": false,
+      "dmg": {
+        "background": "dmg/background.png",
+        "windowSize": { "width": 860, "height": 540 },
+        "appPosition": { "x": 215, "y": 312 },
+        "applicationFolderPosition": { "x": 560, "y": 312 }
+      }
     },
     "shortDescription": "Press-and-hold attention signal for coworkers",
     "longDescription": "Tap lets you press-and-hold a coworker's name to show a click-through screen overlay on their machine while you hold."
