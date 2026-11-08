@@ -1,8 +1,30 @@
 # Tap
 
-Tap is a small cross-platform office app for getting a coworker's attention when they are wearing headphones. Ryan press-and-holds a peer in the menu bar / system tray popover; while he holds, the peer's screens show a click-through glowing border and banner. Releasing stops the signal immediately.
+**Press and hold a teammate in the menu bar to flash a click-through glow on their screens—built for offices where people work in headphones.**
+
+[![CI](https://github.com/rhagerty32/tap/actions/workflows/ci.yml/badge.svg)](https://github.com/rhagerty32/tap/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/github/license/rhagerty32/tap)](LICENSE)
+
+Tap is a small cross-platform desktop app for getting a coworker's attention when they are wearing headphones. You press-and-hold a peer in the menu bar / system tray popover; while you hold, the peer's screens show a click-through glowing border and banner. Releasing stops the signal immediately.
 
 Built with **Tauri v2** (Rust core + lightweight TypeScript UI).
+
+## Screenshot
+
+<!-- Replace with a GIF or screenshot when you have one (overlay + tray list). -->
+> **Placeholder:** Add something like `docs/images/tap-demo.gif` showing the receiver overlay and the tray team list.
+
+## Features
+
+- **Press-and-hold signaling** from the tray popover (pointer down/up—not a native menu item).
+- **Live receiver overlay** on every display: transparent, always-on-top, click-through, no focus steal.
+- **Peer-to-peer UDP** on LAN or Tailscale; no central server or accounts.
+- **Team discovery** via shared team key + Tailscale tailnet, with mDNS on the local network and optional manual host fallback.
+- **Signed messages** (HMAC-SHA256) with timestamp skew and nonce replay protection; optional **Tailnet only** mode (100.64.0.0/10).
+- **Keyboard shortcuts** for opening the team list and holding a teammate's assigned key (platform-specific).
+- **No telemetry**—settings and keys stay on your machines.
+
+Default UDP port: **37561**.
 
 ## How it works
 
@@ -13,8 +35,6 @@ Built with **Tauri v2** (Rust core + lightweight TypeScript UI).
 - **Transport:** peer-to-peer UDP on LAN or Tailscale; no central server.
 - **Discovery:** same team key on the same Tailscale tailnet. Tap says hello to each online machine and shows the ones that answer. On a local network it also uses mDNS. A typed host is only a fallback.
 - **Auth:** HMAC-SHA256 with a shared team key, timestamp skew + nonce replay protection. Optional **Tailnet only** mode (100.64.0.0/10).
-
-Default UDP port: **37561**.
 
 ## Keyboard
 
@@ -45,7 +65,7 @@ xdg-open tap://keys
 
 ### macOS
 
-1. Download the `.dmg` from a GitHub Release (tag `v*`), or build locally (see below).
+1. Download the `.dmg` from a [GitHub Release](https://github.com/rhagerty32/tap/releases) (tag `v*`), or build locally (see below).
 2. Open the DMG and drag **Tap** to Applications.
 3. macOS will say the app is damaged. That dialog is Gatekeeper, and right-click → Open does not get past it. Drag Tap to Applications, then run:
    ```bash
@@ -124,6 +144,8 @@ npm run tauri build
 
 Artifacts land in `src-tauri/target/release/bundle/`.
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for Linux packages CI uses, tests, and PR expectations.
+
 ## Cut a release
 
 1. Bump `version` in `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml` so it matches the tag (`v0.1.0` for version `0.1.0`).
@@ -135,6 +157,10 @@ Artifacts land in `src-tauri/target/release/bundle/`.
 3. The **Release** workflow builds an Apple Silicon `.dmg`, a Linux `.AppImage`, and a `.deb`, then attaches them to the GitHub Release along with `latest.json`.
 4. Settings → **Check for updates** downloads the next version for an app installed from the `.dmg` (dragged to Applications) or for the `.AppImage`. A `.deb` install is updated by installing the new package.
 5. Before the first tag, set the repository secret `TAURI_SIGNING_PRIVATE_KEY` to the contents of `~/.tauri/tap.key`. That private key stays off the repo. Optional Apple signing: `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`.
+
+## Contributing
+
+Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for build, test, and PR guidelines, and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community expectations.
 
 ## Security notes
 
@@ -154,3 +180,7 @@ That runs `cargo test`. The suite covers message signing, replay rejection, the 
 
 - **CI** workflow: `npm audit`, frontend build, `cargo test`, `cargo audit` (non-blocking), Tauri build on Ubuntu + macOS for PRs.
 - **Release** workflow: tagged releases only.
+
+## License
+
+Tap is released under the [MIT License](LICENSE). Copyright Ryan Hagerty.
