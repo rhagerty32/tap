@@ -2,13 +2,17 @@ use crate::peer::{PeerRecord, PeerSource};
 use crate::settings::{canonical_color, color_for_peer, Settings};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
 
-/// Online machines on this tailnet. They are not teammates until one answers
-/// with the shared team key.
+/// `status` is normally well under a second. A stuck CLI must not freeze discovery.
+const TAILSCALE_STATUS_TIMEOUT: Duration = Duration::from_secs(8);
+
 /// `tailscale` is often missing from a menu-bar app's PATH. On macOS the
 /// working binary ships inside Tailscale.app and is not installed on PATH.
 fn tailscale_program() -> PathBuf {
@@ -20,32 +24,86 @@ fn tailscale_program() -> PathBuf {
             candidates.push(dir.join("tailscale.exe"));
         }
     }
-    candidates.extend([
+    candidates.extend(tailscale_fallback_candidates());
+    select_tailscale_program(candidates)
+}
+
+fn tailscale_fallback_candidates() -> Vec<PathBuf> {
+    vec![
         PathBuf::from("/Applications/Tailscale.app/Contents/MacOS/Tailscale"),
         PathBuf::from("/usr/local/bin/tailscale"),
         PathBuf::from("/opt/homebrew/bin/tailscale"),
         PathBuf::from("/usr/bin/tailscale"),
         #[cfg(windows)]
         PathBuf::from(r"C:\Program Files\Tailscale\tailscale.exe"),
-    ]);
+    ]
+}
+
+fn select_tailscale_program(candidates: impl IntoIterator<Item = PathBuf>) -> PathBuf {
     candidates
         .into_iter()
         .find(|path| path.is_file())
         .unwrap_or_else(|| PathBuf::from("tailscale"))
 }
 
-pub fn tailscale_targets(port: u16) -> Vec<SocketAddr> {
-    let output = Command::new(tailscale_program())
+/// The macOS app binary opens its window unless this is set, and then
+/// `status --json` never returns. Menu-bar apps have no terminal environment.
+fn tailscale_status_command(program: &Path) -> Command {
+    let mut command = Command::new(program);
+    command
         .arg("status")
         .arg("--json")
-        .output();
-    let Ok(output) = output else {
+        .env("TAILSCALE_BE_CLI", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    command
+}
+
+fn tailscale_status_stdout(program: &Path, timeout: Duration) -> Option<Vec<u8>> {
+    let mut child = tailscale_status_command(program).spawn().ok()?;
+    let Some(mut stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    };
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        let _ = tx.send(buf);
+    });
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(20)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    if !status.success() {
+        return None;
+    }
+    rx.recv_timeout(Duration::from_secs(2)).ok()
+}
+
+/// Online machines on this tailnet. They are not teammates until one answers
+/// with the shared team key.
+pub fn tailscale_targets(port: u16) -> Vec<SocketAddr> {
+    let Some(stdout) = tailscale_status_stdout(&tailscale_program(), TAILSCALE_STATUS_TIMEOUT)
+    else {
         return Vec::new();
     };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    tailscale_targets_from_status(&output.stdout, port)
+    tailscale_targets_from_status(&stdout, port)
 }
 
 pub fn tailscale_targets_from_status(json: &[u8], port: u16) -> Vec<SocketAddr> {
@@ -287,9 +345,10 @@ pub fn sender_is_hidden(
     src_ip: IpAddr,
 ) -> bool {
     let manuals = manual_peer_records(&settings.manual_peers, settings.listen_port);
-    if manuals.iter().any(|manual| {
-        manual.addrs.iter().any(|addr| addr.ip() == src_ip) || manual.id == sender_id
-    }) {
+    if manuals
+        .iter()
+        .any(|manual| manual.addrs.iter().any(|addr| addr.ip() == src_ip) || manual.id == sender_id)
+    {
         return false;
     }
     if settings.hidden_peers.iter().any(|id| id == sender_id) {
@@ -312,9 +371,9 @@ pub fn sender_is_hidden(
 fn group_hidden(peers: &[&PeerRecord], group: &[usize], settings: &Settings) -> bool {
     let manuals = manual_peer_records(&settings.manual_peers, settings.listen_port);
     if group.iter().any(|&index| {
-        manuals.iter().any(|manual| {
-            manual.id == peers[index].id || same_person(manual, peers[index])
-        })
+        manuals
+            .iter()
+            .any(|manual| manual.id == peers[index].id || same_person(manual, peers[index]))
     }) {
         return false;
     }
@@ -504,10 +563,7 @@ pub fn ids_for_person(map: &HashMap<String, PeerRecord>, peer_id: &str) -> Vec<S
             .into_iter()
             .find(|group| group.contains(&start))
         {
-            return group
-                .iter()
-                .map(|&index| peers[index].id.clone())
-                .collect();
+            return group.iter().map(|&index| peers[index].id.clone()).collect();
         }
     }
     vec![peer_id.to_string()]
@@ -531,6 +587,7 @@ mod tests {
     use crate::settings::Settings;
     use std::collections::HashMap;
     use std::net::SocketAddr;
+    use std::path::{Path, PathBuf};
     use std::time::Instant;
 
     #[test]
@@ -692,10 +749,7 @@ mod tests {
         settings
             .hidden_peers
             .push("manual-Dean-100.113.108.22".into());
-        settings.manual_peers = vec![
-            "Dean@100.113.108.22".into(),
-            "Dean@100.113.108.22".into(),
-        ];
+        settings.manual_peers = vec!["Dean@100.113.108.22".into(), "Dean@100.113.108.22".into()];
         dedupe_manual_peers(&mut settings.manual_peers);
         assert_eq!(settings.manual_peers.len(), 1);
         assert!(reveal_manual_peers(&mut settings, &map));
@@ -711,6 +765,214 @@ mod tests {
             "app-dean",
             "100.113.108.22".parse().unwrap(),
         ));
+    }
+
+    #[test]
+    fn bare_ip_brings_back_the_removed_person() {
+        let mut map = HashMap::new();
+        map.insert(
+            "app-dean".into(),
+            record("app-dean", "Dean", "100.113.108.22", PeerSource::Mdns),
+        );
+        let mut settings = Settings::default();
+        settings.listen_port = 37561;
+        settings.hidden_peers.push("app-dean".into());
+        settings.manual_peers = vec!["100.113.108.22".into()];
+        assert!(reveal_manual_peers(&mut settings, &map));
+        assert!(settings.hidden_peers.is_empty());
+        let manual = manual_peer_records(&settings.manual_peers, settings.listen_port);
+        assert_eq!(manual.len(), 1);
+        assert_eq!(manual[0].id, "manual-100.113.108.22-100.113.108.22");
+        sync_manual_peers(&mut map, manual);
+        let list = peer_list_from_map(&map, &settings);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, "app-dean");
+        assert_eq!(list[0].name, "Dean");
+    }
+
+    #[test]
+    fn typed_host_does_not_bring_back_someone_else() {
+        let mut map = HashMap::new();
+        map.insert(
+            "app-dean".into(),
+            record("app-dean", "Dean", "100.113.108.22", PeerSource::Mdns),
+        );
+        map.insert(
+            "app-alex".into(),
+            record("app-alex", "Alex", "100.64.0.3", PeerSource::Mdns),
+        );
+        let mut settings = Settings::default();
+        settings.listen_port = 37561;
+        settings.hidden_peers = vec!["app-dean".into(), "app-alex".into()];
+        settings.manual_peers = vec!["Dean@100.113.108.22".into()];
+        assert!(reveal_manual_peers(&mut settings, &map));
+        assert_eq!(settings.hidden_peers, vec!["app-alex".to_string()]);
+        let list = peer_list_from_map(&map, &settings);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "Dean");
+    }
+
+    #[test]
+    fn sync_drops_a_manual_host_the_user_removed() {
+        let mut map = HashMap::new();
+        map.insert(
+            "manual-Old-10.0.0.4".into(),
+            record("manual-Old-10.0.0.4", "Old", "10.0.0.4", PeerSource::Manual),
+        );
+        map.insert(
+            "app-alex".into(),
+            record("app-alex", "Alex", "100.64.0.3", PeerSource::Mdns),
+        );
+        let manuals = manual_peer_records(&["Sam@10.0.0.5".into()], 37561);
+        sync_manual_peers(&mut map, manuals);
+        assert!(!map.contains_key("manual-Old-10.0.0.4"));
+        assert!(map.contains_key("app-alex"));
+        assert!(map.contains_key("manual-Sam-10.0.0.5"));
+    }
+
+    #[test]
+    fn dedupe_manual_peers_folds_case_and_blanks() {
+        let mut entries = vec![
+            " Dean@10.0.0.8 ".into(),
+            "dean@10.0.0.8".into(),
+            "  ".into(),
+            String::new(),
+        ];
+        dedupe_manual_peers(&mut entries);
+        assert_eq!(entries, vec![" Dean@10.0.0.8 ".to_string()]);
+    }
+
+    #[test]
+    fn tailnet_status_ignores_self_offline_and_duplicate_ips() {
+        let status = br#"{
+            "Self": {"Online": true, "TailscaleIPs": ["100.64.0.1"]},
+            "Peer": {
+                "me-echo": {"Online": true, "TailscaleIPs": ["100.64.0.2", "100.64.0.2"]},
+                "same": {"Online": true, "TailscaleIPs": ["100.64.0.2"]},
+                "idle": {"Online": false, "TailscaleIPs": ["100.64.0.4"]},
+                "missing": {"TailscaleIPs": ["100.64.0.5"]},
+                "v6": {"Online": true, "TailscaleIPs": ["fd7a:115c:a1e0::9"]}
+            }
+        }"#;
+        let targets = tailscale_targets_from_status(status, 37561);
+        let ips: Vec<_> = targets.iter().map(|addr| addr.ip().to_string()).collect();
+        assert_eq!(
+            ips.iter().filter(|ip| ip.as_str() == "100.64.0.2").count(),
+            1
+        );
+        assert!(ips.contains(&"fd7a:115c:a1e0::9".to_string()));
+        assert!(!ips.iter().any(|ip| ip == "100.64.0.1"));
+        assert!(!ips.iter().any(|ip| ip == "100.64.0.4"));
+        assert!(!ips.iter().any(|ip| ip == "100.64.0.5"));
+        assert!(targets.iter().all(|addr| addr.port() == 37561));
+    }
+
+    #[test]
+    fn tailnet_status_garbage_is_no_peers() {
+        assert!(tailscale_targets_from_status(b"not-json", 37561).is_empty());
+        assert!(tailscale_targets_from_status(b"{}", 37561).is_empty());
+        assert!(tailscale_targets_from_status(br#"{"Peer":null}"#, 37561).is_empty());
+    }
+
+    #[test]
+    fn tailscale_search_includes_paths_a_menu_bar_app_cannot_see() {
+        let paths: Vec<_> = tailscale_fallback_candidates()
+            .into_iter()
+            .map(|path| path.display().to_string())
+            .collect();
+        assert!(paths
+            .iter()
+            .any(|path| path == "/Applications/Tailscale.app/Contents/MacOS/Tailscale"));
+        assert!(paths.iter().any(|path| path == "/usr/local/bin/tailscale"));
+        assert!(paths
+            .iter()
+            .any(|path| path == "/opt/homebrew/bin/tailscale"));
+        assert!(paths.iter().any(|path| path == "/usr/bin/tailscale"));
+    }
+
+    #[test]
+    fn tailscale_program_skips_missing_files_and_directories() {
+        let scratch = Scratch::new("select");
+        let missing = scratch.0.join("missing");
+        let directory = scratch.0.join("dir");
+        std::fs::create_dir(&directory).unwrap();
+        let found = scratch.0.join("found");
+        std::fs::write(&found, b"tailscale").unwrap();
+        let selected =
+            select_tailscale_program([missing.join("tailscale"), directory, found.clone()]);
+        assert_eq!(selected, found);
+        assert_eq!(
+            select_tailscale_program([scratch.0.join("nope")]),
+            PathBuf::from("tailscale")
+        );
+    }
+
+    #[test]
+    fn tailscale_status_forces_cli_mode() {
+        use std::ffi::OsStr;
+        let command = tailscale_status_command(Path::new("tailscale"));
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [OsStr::new("status"), OsStr::new("--json")]
+        );
+        assert!(command
+            .get_envs()
+            .any(|(key, value)| { key == "TAILSCALE_BE_CLI" && value == Some(OsStr::new("1")) }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn menu_bar_tailscale_status_runs_as_the_cli() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = Scratch::new("cli");
+        let program = scratch.0.join("tailscale");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\nif [ \"$TAILSCALE_BE_CLI\" != \"1\" ]; then\n  exit 2\nfi\nprintf '%s' '{\"Peer\":{\"n\":{\"Online\":true,\"TailscaleIPs\":[\"100.64.0.9\"]}}}'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let stdout = tailscale_status_stdout(&program, Duration::from_secs(2)).expect("status");
+        let targets = tailscale_targets_from_status(&stdout, 37561);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].ip().to_string(), "100.64.0.9");
+        assert_eq!(targets[0].port(), 37561);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_or_hung_tailscale_status_is_not_a_peer_list() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = Scratch::new("hung");
+        let failed = scratch.0.join("fail");
+        std::fs::write(&failed, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&failed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(tailscale_status_stdout(&failed, Duration::from_secs(2)).is_none());
+
+        let hung = scratch.0.join("hang");
+        std::fs::write(&hung, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&hung, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let started = Instant::now();
+        assert!(tailscale_status_stdout(&hung, Duration::from_millis(400)).is_none());
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let path =
+                std::env::temp_dir().join(format!("tap-discovery-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 }
 
