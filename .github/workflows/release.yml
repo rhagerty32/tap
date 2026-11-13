@@ -19,8 +19,13 @@ jobs:
             target: linux
             args: --config src-tauri/tauri.release.conf.json
           - os: macos-latest
-            target: macos
+            target: macos-aarch64
+            rust_target: aarch64-apple-darwin
             args: --target aarch64-apple-darwin --config src-tauri/tauri.release.macos.conf.json
+          - os: macos-latest
+            target: macos-x86_64
+            rust_target: x86_64-apple-darwin
+            args: --target x86_64-apple-darwin --config src-tauri/tauri.release.macos.conf.json
     runs-on: ${{ matrix.os }}
     env:
       APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -40,14 +45,14 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Apple Silicon Rust target
-        if: matrix.target == 'macos'
-        run: rustup target add aarch64-apple-darwin
+      - name: Install macOS Rust target
+        if: startsWith(matrix.target, 'macos')
+        run: rustup target add ${{ matrix.rust_target }}
 
       - run: npm ci --include=dev
 
       - name: Import Apple certificate
-        if: matrix.target == 'macos' && env.APPLE_CERTIFICATE != ''
+        if: startsWith(matrix.target, 'macos') && env.APPLE_CERTIFICATE != ''
         env:
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
         run: |
@@ -60,7 +65,7 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k actions build.keychain
 
       - name: Use Apple signing when it is configured
-        if: matrix.target == 'macos'
+        if: startsWith(matrix.target, 'macos')
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -90,8 +95,8 @@ jobs:
           tagName: v__VERSION__
           releaseName: Tap v__VERSION__
           releaseBody: |
-            Apple Silicon macOS and Linux builds.
-            Download the `.dmg`, `.AppImage`, or `.deb`. The `.app.tar.gz` is used by the in-app updater.
+            Apple Silicon and Intel macOS, plus Linux builds.
+            Download the `.dmg` for your Mac (`aarch64` or `x64`), or the `.AppImage` or `.deb`. The `.app.tar.gz` is used by the in-app updater.
           generateReleaseNotes: true
           releaseDraft: false
           prerelease: false
