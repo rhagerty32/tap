@@ -3,6 +3,7 @@ import "@fontsource/inter/500.css";
 import "@fontsource/inter/600.css";
 import "@fontsource/jetbrains-mono/400.css";
 import "./styles.css";
+import "./settings.css";
 import { applyTheme, normalizeTheme } from "./theme";
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
@@ -124,12 +125,14 @@ let updateNote = "";
 type Tab = "profile" | "glow" | "team" | "trackpad" | "app";
 
 const linux = /Linux/i.test(navigator.userAgent);
+// Trackpad gestures only exist on macOS, so the tab is hidden everywhere else.
+const isMac = /Mac/i.test(navigator.platform || navigator.userAgent);
 
 const tabs: { id: Tab; label: string }[] = [
   { id: "profile", label: "Profile" },
   { id: "glow", label: "Glow" },
-  { id: "team", label: "Team members" },
-  ...(linux ? [] : [{ id: "trackpad" as Tab, label: "Trackpad" }]),
+  { id: "team", label: "Team" },
+  ...(isMac ? [{ id: "trackpad" as Tab, label: "Trackpad" }] : []),
   { id: "app", label: "App" },
 ];
 
@@ -550,87 +553,229 @@ function options(pairs: readonly (readonly [string, string])[], selected: string
     .join("");
 }
 
-function edgeRow(label: string, key: string, edge: EdgeSensor): string {
-  return `<label class="block"><span>${label}</span><select data-edge="${key}">${options(SLIDE_ACTIONS, slideValue(edge))}</select></label>`;
+// ---------- UI building blocks ----------
+
+const ICONS = {
+  chevron: `<svg class="chev" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 3.5 5 6.5l3-3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  copy: `<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><rect x="4.5" y="4.5" width="7" height="7" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M9.5 4.5V3.6A1.6 1.6 0 0 0 7.9 2H3.6A1.6 1.6 0 0 0 2 3.6v4.3a1.6 1.6 0 0 0 1.6 1.6h.9" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>`,
+  plus: `<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M6 2v8M2 6h8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>`,
+  close: `<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="m3 3 6 6M9 3 3 9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>`,
+  refresh: `<svg width="13" height="13" viewBox="0 0 14 14" aria-hidden="true"><path d="M11.5 7A4.5 4.5 0 1 1 9.9 3.6M11.5 2v2.4H9.1" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  volume: `<svg width="13" height="13" viewBox="0 0 14 14" aria-hidden="true"><path d="M2 5.4h2L7 3v8L4 8.6H2z" fill="currentColor"/><path d="M9.2 5a3 3 0 0 1 0 4M10.8 3.4a5.2 5.2 0 0 1 0 7.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>`,
+  brightness: `<svg width="13" height="13" viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="2.4" fill="currentColor"/><path d="M7 1.4v1.3M7 11.3v1.3M1.4 7h1.3M11.3 7h1.3M3 3l.9.9M10.1 10.1l.9.9M11 3l-.9.9M3.9 10.1 3 11" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>`,
+  media: `<svg width="13" height="13" viewBox="0 0 14 14" aria-hidden="true"><path d="M3 2.6v8.8L8.6 7z" fill="currentColor"/><path d="M10.6 3v8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>`,
+  off: `<svg width="13" height="13" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 7h7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>`,
+};
+
+function sw(id: string, on: boolean, label: string): string {
+  return `<button id="${id}" class="sw" type="button" role="switch" aria-checked="${on ? "true" : "false"}" aria-label="${esc(label)}"><span class="sw-knob"></span></button>`;
 }
 
-function cornerBlock(title: string, key: string, actions: CornerActions): string {
-  const people = peers
-    .filter((peer) => peer.name)
-    .map((peer) => [peer.id, peer.name] as const);
-  const hold = [["", "No one"], ...people] as const;
-  return `<div class="corner-card">
-    <strong>${title}</strong>
-    <label class="block"><span>Click</span><select data-corner="${key}" data-click="single">${options(CLICK_ACTIONS, actions.single || "none")}</select></label>
-    <label class="block"><span>Double click</span><select data-corner="${key}" data-click="double">${options(CLICK_ACTIONS, actions.double || "none")}</select></label>
-    <label class="block"><span>Hold to tap</span><select data-corner="${key}" data-click="hold">${options(hold, actions.holdPeer || "")}</select></label>
+function row(title: string, desc: string, control: string, cls = ""): string {
+  return `<div class="s-row${cls ? ` ${cls}` : ""}">
+    <div class="row-text"><div class="row-title">${title}</div>${desc ? `<div class="row-desc">${desc}</div>` : ""}</div>
+    <div class="row-ctl">${control}</div>
+  </div>`;
+}
+
+/** A row that only exists while its parent setting is on. It collapses smoothly. */
+function subRow(open: boolean, title: string, desc: string, control: string): string {
+  return `<div class="sub" data-open="${open ? "true" : "false"}"${open ? "" : " inert"}><div class="sub-inner">${row(title, desc, control, "is-sub")}</div></div>`;
+}
+
+function group(title: string, body: string, foot = ""): string {
+  return `<section class="group">${title ? `<h2 class="group-title">${title}</h2>` : ""}<div class="rows">${body}</div>${foot ? `<p class="group-foot">${foot}</p>` : ""}</section>`;
+}
+
+function seg(attr: string, label: string, items: readonly (readonly [string, string])[], current: string): string {
+  const index = Math.max(0, items.findIndex(([value]) => value === current));
+  return `<div class="seg" role="radiogroup" aria-label="${esc(label)}" style="--n:${items.length};--i:${index}"><i class="seg-thumb"></i>${items
+    .map(
+      ([value, text]) =>
+        `<button type="button" role="radio" aria-checked="${value === current ? "true" : "false"}" ${attr}="${esc(value)}">${esc(text)}</button>`,
+    )
+    .join("")}</div>`;
+}
+
+/** A styled button face over a real <select>, so the menu stays native and keyboard friendly. */
+function sel(
+  attrs: string,
+  label: string,
+  pairs: readonly (readonly [string, string])[],
+  current: string,
+  opts: { icon?: string; cls?: string } = {},
+): string {
+  const text = pairs.find(([value]) => value === current)?.[1] ?? "";
+  return `<span class="sel${opts.cls ? ` ${opts.cls}` : ""}">${opts.icon ?? ""}<span class="sel-text">${esc(text)}</span>${ICONS.chevron}<select ${attrs} aria-label="${esc(label)}">${options(pairs, current)}</select></span>`;
+}
+
+/** Patches the DOM in place so CSS transitions run and focus survives a re-render. */
+function morph(from: Element, to: Element) {
+  for (const attr of [...from.attributes]) {
+    if (!to.hasAttribute(attr.name)) from.removeAttribute(attr.name);
+  }
+  for (const attr of [...to.attributes]) {
+    if (from.getAttribute(attr.name) !== attr.value) from.setAttribute(attr.name, attr.value);
+  }
+  if (from instanceof HTMLInputElement && to instanceof HTMLInputElement) {
+    if (document.activeElement !== from) from.value = to.getAttribute("value") ?? "";
+    if (from.type === "checkbox") from.checked = to.hasAttribute("checked");
+    return;
+  }
+  if (from instanceof HTMLSelectElement && to instanceof HTMLSelectElement) {
+    if (from.innerHTML !== to.innerHTML) from.innerHTML = to.innerHTML;
+    from.value = to.value;
+    return;
+  }
+  const have = [...from.childNodes];
+  const want = [...to.childNodes];
+  want.forEach((node, index) => {
+    const current = have[index];
+    if (!current) {
+      from.appendChild(node.cloneNode(true));
+    } else if (
+      current instanceof Element &&
+      node instanceof Element &&
+      current.tagName === node.tagName &&
+      current.id === node.id &&
+      current.getAttribute("data-tab") === node.getAttribute("data-tab") &&
+      !current.hasAttribute("data-fresh") &&
+      !node.hasAttribute("data-fresh")
+    ) {
+      morph(current, node);
+    } else if (current.nodeType === Node.TEXT_NODE && node.nodeType === Node.TEXT_NODE) {
+      if (current.nodeValue !== node.nodeValue) current.nodeValue = node.nodeValue;
+    } else {
+      current.replaceWith(node.cloneNode(true));
+    }
+  });
+  for (const extra of have.slice(want.length)) extra.remove();
+}
+
+// ---------- Trackpad ----------
+
+const EDGES = [
+  ["left", "Left edge"],
+  ["right", "Right edge"],
+  ["top", "Top edge"],
+  ["bottom", "Bottom edge"],
+] as const;
+
+const CORNERS = [
+  ["topLeft", "Top left", "tl"],
+  ["topRight", "Top right", "tr"],
+  ["bottomLeft", "Bottom left", "bl"],
+  ["bottomRight", "Bottom right", "br"],
+] as const;
+
+type CornerKey = (typeof CORNERS)[number][0];
+let padCorner: CornerKey = "topRight";
+
+function labelOf(pairs: readonly (readonly [string, string])[], value: string): string {
+  return pairs.find(([v]) => v === value)?.[1] ?? value;
+}
+
+function cornerSummary(actions: CornerActions): string {
+  const parts: string[] = [];
+  if (actions.single && actions.single !== "none") parts.push(labelOf(CLICK_ACTIONS, actions.single));
+  if (actions.double && actions.double !== "none") parts.push(`${labelOf(CLICK_ACTIONS, actions.double)} ×2`);
+  if (actions.holdPeer) {
+    const who = peers.find((peer) => peer.id === actions.holdPeer)?.name;
+    parts.push(who ? `Tap ${who.split(" ")[0]}` : "Tap");
+  }
+  if (parts.length === 0) return "No action";
+  return parts.length > 1 ? `${parts[0]} +${parts.length - 1}` : parts[0];
+}
+
+function padDiagram(pad: TrackpadSettings): string {
+  const icon = (action: string) => ICONS[action as keyof typeof ICONS] ?? ICONS.off;
+  const pill = (key: (typeof EDGES)[number][0], label: string) => {
+    const edge = pad.edges[key];
+    const value = slideValue(edge);
+    return sel(`data-edge="${key}"`, label, SLIDE_ACTIONS, value, { icon: icon(value), cls: `pill ${key}` });
+  };
+  const bands = EDGES.map(
+    ([key]) => `<i class="band ${key}" data-on="${pad.edges[key].enabled ? "true" : "false"}"></i>`,
+  ).join("");
+  const chips = CORNERS.map(
+    ([key, name, pos]) =>
+      `<button type="button" class="chip ${pos}" data-corner-pick="${key}" aria-pressed="${padCorner === key ? "true" : "false"}" aria-label="${name} corner: ${esc(cornerSummary(pad.corners[key]))}" title="${name} corner">${esc(cornerSummary(pad.corners[key]))}</button>`,
+  ).join("");
+  return `<div class="pad${pad.enabled ? "" : " is-off"}">
+    <div class="pad-face">
+      ${bands}
+      ${EDGES.map(([key, label]) => pill(key, label)).join("")}
+      ${chips}
+      <span class="pad-hint">Slide along an edge</span>
+    </div>
   </div>`;
 }
 
 function trackpadPanel(current: Settings): string {
   const pad = trackpadOf(current);
-  const modifier = pad.requireModifier || "none";
+  const cornerName = CORNERS.find(([key]) => key === padCorner)?.[1] ?? "";
+  const actions = pad.corners[padCorner];
+  const people = peers.filter((peer) => peer.name).map((peer) => [peer.id, peer.name] as const);
+  const hold = [["", "No one"], ...people] as const;
+  const pct = ((pad.sensitivity - 0.4) / 1.6) * 100;
   return `
-    <p class="note">Slide an edge for volume, brightness, or the current track. Rest a finger in a corner to tap someone on your team. A quick click still does whatever you set below it.</p>
-    <div class="toggle-row">
-      <div><strong>Trackpad edges</strong><small>Left is brightness and right is volume until you change them</small></div>
-      <button id="trackpad-enabled" class="switch" type="button" role="switch" aria-checked="${pad.enabled ? "true" : "false"}"><span class="knob"></span></button>
-    </div>
-    <div class="pad-map" aria-hidden="true">
-      <span class="pad-edge top">${esc(slideValue(pad.edges.top))}</span>
-      <span class="pad-edge left">${esc(slideValue(pad.edges.left))}</span>
-      <span class="pad-face"></span>
-      <span class="pad-edge right">${esc(slideValue(pad.edges.right))}</span>
-      <span class="pad-edge bottom">${esc(slideValue(pad.edges.bottom))}</span>
-    </div>
-    <div class="edge-grid">
-      ${edgeRow("Left edge", "left", pad.edges.left)}
-      ${edgeRow("Right edge", "right", pad.edges.right)}
-      ${edgeRow("Top edge", "top", pad.edges.top)}
-      ${edgeRow("Bottom edge", "bottom", pad.edges.bottom)}
-    </div>
-    <label class="block"><span>Sensitivity ${pad.sensitivity.toFixed(1)}</span>
-      <input id="trackpad-sensitivity" type="range" min="0.4" max="2" step="0.1" value="${pad.sensitivity}" />
-    </label>
-    <label class="block"><span>Require a key</span>
-      <select id="trackpad-modifier">${options(
-        [
-          ["none", "None"],
-          ["fn", "FN"],
-          ["option", "Option"],
-          ["control", "Control"],
-        ],
-        modifier,
-      )}</select>
-    </label>
-    <div class="toggle-row"><div><strong>Flip vertical edges</strong><small>For a trackpad that reports up and down backwards</small></div>
-      <button id="trackpad-flip" class="switch" type="button" role="switch" aria-checked="${pad.flipVerticalEdges ? "true" : "false"}"><span class="knob"></span></button></div>
-    <div class="toggle-row"><div><strong>Keep the pointer still</strong><small>The cursor stays put while you slide</small></div>
-      <button id="trackpad-freeze" class="switch" type="button" role="switch" aria-checked="${pad.freezeCursor ? "true" : "false"}"><span class="knob"></span></button></div>
-    <div class="toggle-row"><div><strong>Precise sliding</strong><small>Quarter steps. Hold Shift and Option for the same thing when this is off</small></div>
-      <button id="trackpad-precise" class="switch" type="button" role="switch" aria-checked="${pad.preciseSliding ? "true" : "false"}"><span class="knob"></span></button></div>
-    <div class="toggle-row"><div><strong>Haptics</strong><small>A tick each time the level crosses a step</small></div>
-      <button id="trackpad-haptics" class="switch" type="button" role="switch" aria-checked="${pad.hapticsEnabled ? "true" : "false"}"><span class="knob"></span></button></div>
-    <label class="block"><span>Haptic strength</span>
-      <select id="trackpad-strength">${options(
-        [
-          ["light", "Light"],
-          ["medium", "Medium"],
-          ["strong", "Strong"],
-        ],
-        pad.hapticStrength || "medium",
-      )}</select>
-    </label>
-    <div class="toggle-row"><div><strong>Reverse media swipes</strong></div>
-      <button id="trackpad-reverse" class="switch" type="button" role="switch" aria-checked="${pad.mediaStripReverse ? "true" : "false"}"><span class="knob"></span></button></div>
-    <div class="toggle-row"><div><strong>Show the level</strong><small>A small panel while you slide</small></div>
-      <button id="trackpad-hud" class="switch" type="button" role="switch" aria-checked="${pad.showHUD ? "true" : "false"}"><span class="knob"></span></button></div>
-    <div class="corner-grid">
-      ${cornerBlock("Top left", "topLeft", pad.corners.topLeft)}
-      ${cornerBlock("Top right", "topRight", pad.corners.topRight)}
-      ${cornerBlock("Bottom left", "bottomLeft", pad.corners.bottomLeft)}
-      ${cornerBlock("Bottom right", "bottomRight", pad.corners.bottomRight)}
-    </div>`;
+    ${group("", row("Trackpad gestures", "Edge slides and corner actions on this Mac", sw("trackpad-enabled", pad.enabled, "Trackpad gestures")))}
+    ${padDiagram(pad)}
+    <p class="pad-note">Pick what each edge does. Select a corner to set its actions below.</p>
+    ${group(
+      `${cornerName} corner`,
+      `<div class="corner-tabs">${seg("data-corner-tab", "Corner", CORNERS.map(([key, name]) => [key, name] as const), padCorner)}</div>` +
+        row("Click", "", sel(`data-corner="${padCorner}" data-click="single"`, `${cornerName} click`, CLICK_ACTIONS, actions.single || "none")) +
+        row("Double click", "", sel(`data-corner="${padCorner}" data-click="double"`, `${cornerName} double click`, CLICK_ACTIONS, actions.double || "none")) +
+        row("Rest a finger to tap", "Hold in this corner to tap someone on your team", sel(`data-corner="${padCorner}" data-click="hold"`, `${cornerName} hold`, hold, actions.holdPeer || "")),
+    )}
+    ${group(
+      "Sliding",
+      row(
+        "Sensitivity",
+        "How far a finger moves the level",
+        `<input id="trackpad-sensitivity" class="range" type="range" min="0.4" max="2" step="0.1" value="${pad.sensitivity}" style="--p:${pct}%" aria-label="Sensitivity" /><span id="trackpad-sensitivity-value" class="value">${pad.sensitivity.toFixed(1)}×</span>`,
+      ) +
+        row(
+          "Require a key",
+          "Only slide while this key is held",
+          seg(
+            "data-modifier",
+            "Required key",
+            [
+              ["none", "None"],
+              ["fn", "Fn"],
+              ["option", "Option"],
+              ["control", "Control"],
+            ],
+            pad.requireModifier || "none",
+          ),
+        ) +
+        row("Keep the pointer still", "The cursor stays put while you slide", sw("trackpad-freeze", pad.freezeCursor, "Keep the pointer still")) +
+        row("Precise sliding", "Quarter steps. With this off, hold Shift and Option for the same", sw("trackpad-precise", pad.preciseSliding, "Precise sliding")) +
+        row("Flip vertical edges", "For a trackpad that reports up and down backwards", sw("trackpad-flip", pad.flipVerticalEdges, "Flip vertical edges")) +
+        row("Reverse media swipes", "Swap which way is next and previous", sw("trackpad-reverse", pad.mediaStripReverse, "Reverse media swipes")),
+    )}
+    ${group(
+      "Feedback",
+      row("Haptics", "A tick each time the level crosses a step", sw("trackpad-haptics", pad.hapticsEnabled, "Haptics")) +
+        subRow(
+          pad.hapticsEnabled,
+          "Strength",
+          "",
+          seg(
+            "data-strength",
+            "Haptic strength",
+            [
+              ["light", "Light"],
+              ["medium", "Medium"],
+              ["strong", "Strong"],
+            ],
+            pad.hapticStrength || "medium",
+          ),
+        ) +
+        row("Show the level", "A small panel while you slide", sw("trackpad-hud", pad.showHUD, "Show the level")),
+    )}`;
 }
 
 function bindTrackpad() {
@@ -644,8 +789,7 @@ function bindTrackpad() {
     const button = document.getElementById(id);
     if (!button) return;
     button.onclick = () => {
-      const next = button.getAttribute("aria-checked") !== "true";
-      apply(next);
+      apply(button.getAttribute("aria-checked") !== "true");
       save();
     };
   };
@@ -661,42 +805,46 @@ function bindTrackpad() {
     select.onchange = () => {
       const key = select.dataset.edge as keyof TrackpadSettings["edges"] | undefined;
       if (!key) return;
-      const value = select.value;
       const edge = pad.edges[key];
-      if (value === "off") edge.enabled = false;
+      if (select.value === "off") edge.enabled = false;
       else {
         edge.enabled = true;
-        edge.action = value;
+        edge.action = select.value;
       }
       save();
     };
   }
-  const modifier = document.getElementById("trackpad-modifier") as HTMLSelectElement | null;
-  if (modifier) {
-    modifier.onchange = () => {
-      pad.requireModifier = modifier.value;
+  for (const button of root.querySelectorAll<HTMLButtonElement>("[data-modifier]")) {
+    button.onclick = () => {
+      pad.requireModifier = button.dataset.modifier || "none";
       save();
     };
   }
-  const strength = document.getElementById("trackpad-strength") as HTMLSelectElement | null;
-  if (strength) {
-    strength.onchange = () => {
-      pad.hapticStrength = strength.value;
+  for (const button of root.querySelectorAll<HTMLButtonElement>("[data-strength]")) {
+    button.onclick = () => {
+      pad.hapticStrength = button.dataset.strength || "medium";
       save();
+    };
+  }
+  for (const button of root.querySelectorAll<HTMLButtonElement>("[data-corner-pick], [data-corner-tab]")) {
+    button.onclick = () => {
+      padCorner = (button.dataset.cornerPick || button.dataset.cornerTab) as CornerKey;
+      render();
     };
   }
   const sensitivity = document.getElementById("trackpad-sensitivity") as HTMLInputElement | null;
   if (sensitivity) {
     sensitivity.oninput = () => {
       pad.sensitivity = Number(sensitivity.value);
-      const label = sensitivity.closest("label")?.querySelector("span");
-      if (label) label.textContent = `Sensitivity ${pad.sensitivity.toFixed(1)}`;
+      sensitivity.style.setProperty("--p", `${((pad.sensitivity - 0.4) / 1.6) * 100}%`);
+      const value = document.getElementById("trackpad-sensitivity-value");
+      if (value) value.textContent = `${pad.sensitivity.toFixed(1)}×`;
     };
-    sensitivity.onchange = () => save();
+    sensitivity.onchange = () => void persist();
   }
   for (const select of root.querySelectorAll<HTMLSelectElement>("select[data-corner]")) {
     select.onchange = () => {
-      const key = select.dataset.corner as keyof TrackpadSettings["corners"] | undefined;
+      const key = select.dataset.corner as CornerKey | undefined;
       const which = select.dataset.click;
       if (!key || !which) return;
       const actions = pad.corners[key];
@@ -706,6 +854,16 @@ function bindTrackpad() {
       save();
     };
   }
+}
+
+function selectTab(next: Tab | undefined) {
+  if (!next || next === tab || !tabs.some((item) => item.id === next)) return;
+  tab = next;
+  adding = false;
+  colorFor = null;
+  armingShortcut = false;
+  render();
+  window.scrollTo(0, 0);
 }
 
 function render() {
@@ -722,172 +880,177 @@ function render() {
   const glow = GLOW_STYLES.includes(settings.glowStyle) ? settings.glowStyle : "edge";
   const screens = settings.overlayScreens || "all";
   const selected = new Set(settings.selectedDisplays || []);
+  const people = peopleRows();
+  const currentTheme = normalizeTheme(settings.theme);
+  const tabIndex = Math.max(0, tabs.findIndex((item) => item.id === tab));
   const panel =
     tab === "profile"
-      ? `
-      <div class="profile">
-        <button id="pick-photo" class="avatar photo" type="button" title="Choose photo">${photo ? `<img src="${photo}" alt="" />` : "You"}</button>
-        <div>
-          <strong>Profile photo</strong>
-          <small>People on your team load it when you are nearby, and again when it changes.</small>
-        </div>
-        <input id="photo-file" type="file" accept="image/*" hidden />
-      </div>
-      <label class="block"><span>Your name</span>
-        <input id="name" type="text" value="${esc(settings.displayName)}" />
-      </label>
-      <label class="block"><span>Team key</span>
-        <div class="key-field">
-          <input id="key" class="mono" type="text" value="${esc(settings.teamKey)}" spellcheck="false" />
-          <button id="copy" class="copy" type="button">Copy</button>
-        </div>
-      </label>`
+      ? group(
+          "Profile",
+          row(
+            "Photo",
+            "Teammates nearby see it, and again when it changes",
+            `<button id="pick-photo" class="avatar photo" type="button" title="Change photo" aria-label="Change photo">${photo ? `<img src="${photo}" alt="" />` : "You"}</button><input id="photo-file" type="file" accept="image/*" hidden data-fresh />`,
+          ) +
+            row(
+              "Name",
+              "Shown to your team",
+              `<input id="name" class="input" type="text" value="${esc(settings.displayName)}" aria-label="Your name" data-fresh />`,
+            ),
+        ) +
+        group(
+          "Team",
+          row(
+            "Team key",
+            "Use the same key on every computer in your team",
+            `<input id="key" class="input mono" type="text" value="${esc(settings.teamKey)}" spellcheck="false" aria-label="Team key" data-fresh /><button id="copy" class="btn icon" type="button" title="Copy team key" aria-label="Copy team key">${ICONS.copy}</button>`,
+          ),
+        )
       : tab === "glow"
-        ? `
-      <div>
-        <div class="swatch-label">Screens</div>
-        <div class="choices">
-          ${["all", "cursor", "selected"]
-            .map((mode) => {
-              const label = mode === "all" ? "All displays" : mode === "cursor" ? "Under the pointer" : "Choose";
-              return `<button class="choice${screens === mode ? " selected" : ""}" type="button" data-screens="${mode}">${label}</button>`;
-            })
-            .join("")}
-        </div>
-        ${
-          screens === "selected"
-            ? displays
-                .map(
-                  (name) =>
-                    `<label class="check"><input type="checkbox" data-display="${esc(name)}" ${selected.has(name) ? "checked" : ""} />${esc(name)}</label>`,
-                )
-                .join("")
-            : ""
-        }
-      </div>
-      <div>
-        <div class="swatch-label">Glow</div>
-        <div class="choices">
-          ${GLOW_STYLES.map(
-            (style) =>
-              `<button class="choice${glow === style ? " selected" : ""}" type="button" data-glow="${style}">${style[0].toUpperCase()}${style.slice(1)}</button>`,
-          ).join("")}
-        </div>
-        <label class="check"><input id="banner" type="checkbox" ${settings.showBanner !== false ? "checked" : ""} />Show the name banner</label>
-        <button id="preview-glow" class="preview" type="button">Preview</button>
-      </div>`
+        ? group(
+            "Display",
+            row(
+              "Screens",
+              "Where the glow appears",
+              seg(
+                "data-screens",
+                "Screens",
+                [
+                  ["all", "All"],
+                  ["cursor", "Pointer"],
+                  ["selected", "Choose"],
+                ],
+                screens,
+              ),
+            ) +
+              (screens === "selected"
+                ? displays.length === 0
+                  ? row("No displays found", "", "", "is-empty")
+                  : displays
+                      .map((name) =>
+                        row(
+                          esc(name),
+                          "",
+                          `<label class="cb"><input type="checkbox" data-display="${esc(name)}" ${selected.has(name) ? "checked" : ""} aria-label="${esc(name)}" data-fresh /><span class="cb-box"></span></label>`,
+                          "is-sub",
+                        ),
+                      )
+                      .join("")
+                : ""),
+          ) +
+          `<section class="group"><h2 class="group-title">Style</h2>
+            <div class="tiles" role="radiogroup" aria-label="Glow style">${GLOW_STYLES.map(
+              (style) =>
+                `<button class="tile" type="button" role="radio" aria-checked="${glow === style ? "true" : "false"}" data-glow="${style}"><span class="tile-art g-${style}"></span><span class="tile-name">${style[0].toUpperCase()}${style.slice(1)}</span></button>`,
+            ).join("")}</div>
+            <div class="rows">${
+              row("Name banner", "Show who tapped you", sw("banner", settings.showBanner !== false, "Show the name banner")) +
+              row("Preview", "See the glow on your screens", `<button id="preview-glow" class="btn" type="button" data-fresh>Preview</button>`)
+            }</div></section>`
         : tab === "team"
-          ? `
-      <div>
-        <div class="swatch-label">People</div>
-        ${
-          peopleRows().length === 0
-            ? `<p class="note">People show up here after Tap has seen them.</p>`
-            : peopleRows()
-                .map((person) => {
-                  const photoUrl = peerPhotos.get(person.id);
-                  const face = photoUrl ? `<img src="${esc(photoUrl)}" alt="" />` : esc(initials(person.name));
-                  const open = colorFor === person.id;
-                  return `<div class="member" data-person="${esc(person.id)}">
-                    <span class="avatar" style="background:${esc(person.color)}">${face}</span>
-                    <span class="member-name">
-                      <span class="member-title">${esc(person.name)}</span>
-                      ${person.detail ? `<span class="member-detail">${esc(person.detail)}</span>` : ""}
-                    </span>
-                    <input class="member-key" data-hotkey="${esc(person.id)}" type="text" inputmode="text" maxlength="1" spellcheck="false" autocomplete="off" value="${esc(person.hotkey)}" placeholder="·" aria-label="Key for ${esc(person.name)}" title="Press a letter or number. Backspace clears it." />
-                    <button type="button" class="swatch" data-colors="${esc(person.id)}" style="--swatch:${esc(person.color)}" aria-expanded="${open ? "true" : "false"}" aria-label="Color for ${esc(person.name)}"></button>
-                    <button type="button" class="member-remove" data-remove="${esc(person.id)}">Remove</button>
-                  </div>`;
-                })
-                .join("")
-        }
-        ${
-          adding
-            ? `<input id="add-peer" class="add-input mono" type="text" placeholder="Host name or IP" value="${esc(addDraft)}" />`
-            : `<button id="add" class="add" type="button">+ Add someone</button>`
-        }
-        <p class="note">Give each person one key on this computer. ${linux ? "After the Open team list shortcut," : "After your Raycast shortcut opens Tap,"} hold that key to tap them. Backspace clears a key. The color stays on this computer. Remove hides someone here.</p>
-      </div>
-      <div class="update-row">
-        <div><strong>Find people</strong><small>${esc(refreshedLabel(refreshedAt))}</small></div>
-        <button id="refresh-people" type="button" ${refreshBusy ? "disabled" : ""}>${refreshBusy ? "Refreshing…" : "Refresh"}</button>
-      </div>
-      <div class="toggle-row">
-        <div><strong>Tailscale only</strong><small>Only find people on your tailnet</small></div>
-        <button id="tailnet" class="switch" type="button" role="switch" aria-checked="${settings.tailnetOnly ? "true" : "false"}">
-          <span class="knob"></span>
-        </button>
-      </div>`
+          ? group(
+              `People${people.length ? ` · ${people.length}` : ""}`,
+              (people.length === 0
+                ? row("No one yet", "People show up here after Tap has seen them", "", "is-empty")
+                : people
+                    .map((person) => {
+                      const photoUrl = peerPhotos.get(person.id);
+                      const face = photoUrl ? `<img src="${esc(photoUrl)}" alt="" />` : esc(initials(person.name));
+                      const open = colorFor === person.id;
+                      return `<div class="s-row member" data-person="${esc(person.id)}">
+                        <span class="avatar" style="background:${esc(person.color)}">${face}</span>
+                        <div class="row-text"><div class="row-title">${esc(person.name)}</div>${person.detail ? `<div class="row-desc mono">${esc(person.detail)}</div>` : ""}</div>
+                        <div class="row-ctl">
+                          <label class="keycap" title="Tap key. Hold this key to tap ${esc(person.name)}."><input data-hotkey="${esc(person.id)}" data-fresh type="text" inputmode="text" maxlength="1" spellcheck="false" autocomplete="off" value="${esc(person.hotkey)}" placeholder="Key" aria-label="Tap key for ${esc(person.name)}" /></label>
+                          <button type="button" class="swatch" data-colors="${esc(person.id)}" style="--swatch:${esc(person.color)}" aria-expanded="${open ? "true" : "false"}" aria-label="Color for ${esc(person.name)}" title="Color"></button>
+                          <button type="button" class="btn icon ghost" data-remove="${esc(person.id)}" title="Remove from this computer" aria-label="Remove ${esc(person.name)}">${ICONS.close}</button>
+                        </div>
+                      </div>`;
+                    })
+                    .join("")) +
+                (adding
+                  ? `<div class="s-row is-add"><input id="add-peer" class="input mono wide" type="text" placeholder="Host name or IP, then Enter" value="${esc(addDraft)}" data-fresh /></div>`
+                  : `<div class="s-row is-add"><button id="add" class="btn ghost add" type="button" data-fresh>${ICONS.plus}<span>Add someone</span></button></div>`),
+              `Hold a person's key after ${linux ? "the Open team list shortcut" : "your Raycast shortcut opens Tap"} to tap them. Press Backspace in a key field to clear it. Colors and removals only apply on this computer.`,
+            ) +
+            group(
+              "Discovery",
+              row(
+                "Find people",
+                esc(refreshedLabel(refreshedAt)),
+                `<button id="refresh-people" class="btn" type="button" ${refreshBusy ? "disabled" : ""} data-fresh>${ICONS.refresh}<span>${refreshBusy ? "Refreshing…" : "Refresh"}</span></button>`,
+              ) + row("Tailscale only", "Only find people on your tailnet", sw("tailnet", settings.tailnetOnly, "Tailscale only")),
+            )
           : tab === "trackpad"
             ? trackpadPanel(settings)
-            : `
-      <div>
-        <div class="swatch-label">Appearance</div>
-        <div class="choices">
-          ${["system", "light", "dark"]
-            .map((mode) => {
-              const label = mode === "system" ? "Follow system" : mode === "light" ? "Light" : "Dark";
-              const current = normalizeTheme(settings!.theme);
-              return `<button class="choice${current === mode ? " selected" : ""}" type="button" data-theme="${mode}">${label}</button>`;
-            })
-            .join("")}
-        </div>
-      </div>
-      ${
-          linux
-            ? `<div class="update-row">
-        <div><strong>Open team list</strong><small>${esc(armingShortcut ? "Press Ctrl, Alt, Shift, or Super with a key. Backspace clears it." : shortcutNote || "Then hold someone's key from Team members.")}</small></div>
-        <button id="roster-shortcut" type="button">${armingShortcut ? "Listening…" : esc(shortcutLabel(settings.rosterShortcut) || "Set")}</button>
-      </div>`
-            : ""
-        }
-      <div class="toggle-row">
-        <div><strong>Launch at login</strong><small>Open Tap when you sign in</small></div>
-        <button id="login" class="switch" type="button" role="switch" aria-checked="${settings.launchAtLogin ? "true" : "false"}">
-          <span class="knob"></span>
-        </button>
-      </div>
-      <div class="toggle-row">
-        <div><strong>Follow system Focus</strong><small>Also pause taps while the system is in Focus</small></div>
-        <button id="focus" class="switch" type="button" role="switch" aria-checked="${settings.followSystemDnd ? "true" : "false"}">
-          <span class="knob"></span>
-        </button>
-      </div>
-      <div class="update-row">
-        <div><strong>Updates</strong><small>${esc(updateNote || (appVersion ? `Version ${appVersion}` : "Release builds can update from GitHub"))}</small></div>
-        <button id="check-update" type="button" ${updateBusy || preview ? "disabled" : ""}>${esc(updateLabel)}</button>
-      </div>`;
+            : group(
+                "Appearance",
+                row(
+                  "Theme",
+                  "",
+                  seg(
+                    "data-theme",
+                    "Theme",
+                    [
+                      ["system", "System"],
+                      ["light", "Light"],
+                      ["dark", "Dark"],
+                    ],
+                    currentTheme,
+                  ),
+                ),
+              ) +
+              group(
+                "General",
+                (linux
+                  ? row(
+                      "Open team list",
+                      esc(armingShortcut ? "Press Ctrl, Alt, Shift, or Super with a key. Backspace clears it." : shortcutNote || "Then hold someone's key from Team"),
+                      `<button id="roster-shortcut" class="btn${armingShortcut ? " is-armed" : ""}" type="button" data-fresh>${armingShortcut ? "Listening…" : esc(shortcutLabel(settings.rosterShortcut) || "Set")}</button>`,
+                    )
+                  : "") +
+                  row("Launch at login", "Open Tap when you sign in", sw("login", settings.launchAtLogin, "Launch at login")) +
+                  row("Follow system Focus", "Also pause taps while the system is in Focus", sw("focus", settings.followSystemDnd, "Follow system Focus")),
+              ) +
+              group(
+                "About",
+                row(
+                  "Updates",
+                  esc(updateNote || (appVersion ? `Version ${appVersion}` : "Release builds can update from GitHub")),
+                  `<button id="check-update" class="btn" type="button" ${updateBusy || preview ? "disabled" : ""} data-fresh>${esc(updateLabel)}</button>`,
+                ),
+              );
 
-  root.innerHTML = `
+  const shell = `
     <div class="settings">
-      <div class="tabs-bar">
-        <div class="tabs" role="tablist">
-          ${tabs
-            .map(
-              (item) =>
-                `<button type="button" role="tab" data-tab="${item.id}" aria-selected="${tab === item.id ? "true" : "false"}">${item.label}</button>`,
-            )
-            .join("")}
+      <header class="bar">
+        <div class="wrap">
+          <div class="tabs" role="tablist" aria-label="Settings" style="--n:${tabs.length};--i:${tabIndex}">
+            ${tabs
+              .map(
+                (item) =>
+                  `<button type="button" role="tab" id="tab-${item.id}" data-tab="${item.id}" aria-selected="${tab === item.id ? "true" : "false"}" aria-controls="panel" tabindex="${tab === item.id ? "0" : "-1"}">${item.label}</button>`,
+              )
+              .join("")}
+            <i class="tab-ind" aria-hidden="true"></i>
+          </div>
         </div>
-      </div>
-      <div class="tab-panel" role="tabpanel">
-        ${error ? `<p class="error">${esc(error)}</p>` : ""}
+      </header>
+      <main class="wrap tab-panel" id="panel" role="tabpanel" aria-labelledby="tab-${tab}" data-tab="${tab}">
+        ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ""}
         ${panel}
-      </div>
+      </main>
     </div>
   `;
+  const template = document.createElement("template");
+  template.innerHTML = shell.trim();
+  const next = template.content.firstElementChild!;
+  const current = root.firstElementChild;
+  if (current && current.classList.contains("settings")) morph(current, next);
+  else root.replaceChildren(next);
 
   for (const button of root.querySelectorAll<HTMLButtonElement>("[data-tab]")) {
-    button.onclick = () => {
-      const next = button.dataset.tab as Tab | undefined;
-      if (!next || next === tab) return;
-      tab = next;
-      adding = false;
-      colorFor = null;
-      armingShortcut = false;
-      render();
-      window.scrollTo(0, 0);
-    };
+    button.onclick = () => selectTab(button.dataset.tab as Tab | undefined);
   }
 
   const name = document.getElementById("name") as HTMLInputElement | null;
@@ -904,6 +1067,12 @@ function render() {
   if (copy) {
     copy.onclick = () => {
       void navigator.clipboard.writeText(settings!.teamKey).catch(() => {});
+      copy.classList.add("is-done");
+      copy.setAttribute("title", "Copied");
+      window.setTimeout(() => {
+        copy.classList.remove("is-done");
+        copy.setAttribute("title", "Copy team key");
+      }, 1400);
     };
   }
   const pickPhoto = document.getElementById("pick-photo");
@@ -952,11 +1121,14 @@ function render() {
       render();
     };
   }
-  document.getElementById("banner")?.addEventListener("change", () => {
-    const box = document.getElementById("banner") as HTMLInputElement;
-    settings!.showBanner = box.checked;
-    void persist();
-  });
+  const banner = document.getElementById("banner");
+  if (banner) {
+    banner.onclick = () => {
+      settings!.showBanner = banner.getAttribute("aria-checked") !== "true";
+      void persist();
+      render();
+    };
+  }
   const previewGlow = document.getElementById("preview-glow");
   if (previewGlow) {
     previewGlow.onclick = () => {
@@ -1406,5 +1578,31 @@ async function boot() {
   });
   document.addEventListener("scroll", () => placeColorPop(), true);
 }
+
+window.addEventListener("keydown", (event) => {
+  if (armingShortcut) return;
+  if ((event.altKey || event.metaKey || event.ctrlKey) && /^[1-9]$/.test(event.key)) {
+    const target = tabs[Number(event.key) - 1];
+    if (target) {
+      event.preventDefault();
+      selectTab(target.id);
+    }
+    return;
+  }
+  const focused = document.activeElement;
+  if ((event.key === "ArrowRight" || event.key === "ArrowLeft") && focused instanceof HTMLButtonElement) {
+    const group = focused.closest<HTMLElement>(".tabs, .seg, .tiles");
+    if (group) {
+      const items = [...group.querySelectorAll<HTMLButtonElement>("button")];
+      const at = items.indexOf(focused);
+      const step = event.key === "ArrowRight" ? 1 : -1;
+      const target = items[(at + step + items.length) % items.length];
+      event.preventDefault();
+      target.focus();
+      target.click();
+      return;
+    }
+  }
+});
 
 void boot();
