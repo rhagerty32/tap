@@ -1,4 +1,6 @@
 mod avatar;
+#[cfg(target_os = "macos")]
+mod gestures;
 mod discovery;
 mod focus;
 mod network;
@@ -83,6 +85,8 @@ fn save_app_settings(
     }
     configure_autostart(&app, saved.launch_at_login)?;
     apply_app_theme(&app, &saved.theme);
+    #[cfg(target_os = "macos")]
+    gestures::apply(&saved);
     let _ = app.emit("settings-changed", saved.clone());
     let _ = app.emit(
         "dnd-changed",
@@ -302,7 +306,7 @@ fn sender_id(state: State<AppState>) -> String {
     stable_sender_id(&cfg.display_name)
 }
 
-fn team_key_missing(cfg: &Settings) -> bool {
+pub(crate) fn team_key_missing(cfg: &Settings) -> bool {
     cfg.team_key.trim().is_empty()
 }
 
@@ -374,7 +378,7 @@ fn refresh_tray_icon(app: &AppHandle) {
 }
 
 #[cfg(target_os = "macos")]
-fn perform_alignment_haptic() {
+pub(crate) fn perform_alignment_haptic() {
     unsafe {
         use objc2::runtime::{AnyClass, AnyObject};
         // objc2 0.5 looks classes up by name string. A c"..." literal is a CStr.
@@ -1597,6 +1601,12 @@ pub fn run() {
             );
             app.state::<AppState>().network.lock().replace(net);
 
+            #[cfg(target_os = "macos")]
+            {
+                gestures::install(app.handle());
+                gestures::apply(&settings.lock());
+            }
+
             let show = MenuItem::with_id(app, "show", "Open Tap", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &quit])?;
@@ -1740,6 +1750,8 @@ pub fn run() {
             if let Some(net) = app.state::<AppState>().network.lock().take() {
                 net.stop();
             }
+            #[cfg(target_os = "macos")]
+            gestures::shutdown();
         }
     });
 }

@@ -31,6 +31,42 @@ type Settings = {
   peerKeys?: Record<string, string>;
   rosterShortcut?: string | null;
   theme?: string;
+  trackpad?: TrackpadSettings;
+};
+
+type EdgeSensor = {
+  enabled: boolean;
+  action: string;
+  start: number;
+  end: number;
+  thickness: number;
+};
+
+type CornerActions = {
+  single: string;
+  double: string;
+  holdPeer: string;
+};
+
+type TrackpadSettings = {
+  enabled: boolean;
+  edges: { left: EdgeSensor; right: EdgeSensor; top: EdgeSensor; bottom: EdgeSensor };
+  corners: {
+    topLeft: CornerActions;
+    topRight: CornerActions;
+    bottomLeft: CornerActions;
+    bottomRight: CornerActions;
+  };
+  sensitivity: number;
+  requireModifier: string;
+  flipVerticalEdges: boolean;
+  freezeCursor: boolean;
+  preciseSliding: boolean;
+  fineControlWithModifiers: boolean;
+  hapticsEnabled: boolean;
+  hapticStrength: string;
+  mediaStripReverse: boolean;
+  showHUD: boolean;
 };
 
 type Preview = { settings: Settings; peers?: TeamPeer[] };
@@ -85,19 +121,21 @@ let updateBusy = false;
 let updateLabel = "Check for updates";
 let updateNote = "";
 
-type Tab = "profile" | "glow" | "team" | "app";
+type Tab = "profile" | "glow" | "team" | "trackpad" | "app";
+
+const linux = /Linux/i.test(navigator.userAgent);
 
 const tabs: { id: Tab; label: string }[] = [
   { id: "profile", label: "Profile" },
   { id: "glow", label: "Glow" },
   { id: "team", label: "Team members" },
+  ...(linux ? [] : [{ id: "trackpad" as Tab, label: "Trackpad" }]),
   { id: "app", label: "App" },
 ];
 
 let tab: Tab = "profile";
 let armingShortcut = false;
 let shortcutNote = "";
-const linux = /Linux/i.test(navigator.userAgent);
 
 const root = document.querySelector<HTMLDivElement>("#settings")!;
 
@@ -444,6 +482,232 @@ function peopleRows(): PersonRow[] {
   return rows;
 }
 
+function cornerBlank(): CornerActions {
+  return { single: "none", double: "none", holdPeer: "" };
+}
+
+function sensor(action: string, enabled = true): EdgeSensor {
+  return { enabled, action, start: 0, end: 1, thickness: 0.18 };
+}
+
+function defaultTrackpad(): TrackpadSettings {
+  const topRight = cornerBlank();
+  topRight.double = "mute";
+  return {
+    enabled: true,
+    edges: {
+      left: sensor("brightness"),
+      right: sensor("volume"),
+      top: sensor("media", false),
+      bottom: sensor("media"),
+    },
+    corners: {
+      topLeft: cornerBlank(),
+      topRight,
+      bottomLeft: cornerBlank(),
+      bottomRight: cornerBlank(),
+    },
+    sensitivity: 1,
+    requireModifier: "none",
+    flipVerticalEdges: false,
+    freezeCursor: true,
+    preciseSliding: false,
+    fineControlWithModifiers: true,
+    hapticsEnabled: true,
+    hapticStrength: "medium",
+    mediaStripReverse: false,
+    showHUD: true,
+  };
+}
+
+function trackpadOf(current: Settings): TrackpadSettings {
+  if (!current.trackpad) current.trackpad = defaultTrackpad();
+  return current.trackpad;
+}
+
+const SLIDE_ACTIONS = [
+  ["off", "Off"],
+  ["volume", "Volume"],
+  ["brightness", "Brightness"],
+  ["media", "Media"],
+] as const;
+
+const CLICK_ACTIONS = [
+  ["none", "None"],
+  ["mute", "Mute"],
+  ["playPause", "Play / pause"],
+  ["next", "Next track"],
+  ["previous", "Previous track"],
+] as const;
+
+function slideValue(edge: EdgeSensor): string {
+  return edge.enabled ? edge.action : "off";
+}
+
+function options(pairs: readonly (readonly [string, string])[], selected: string): string {
+  return pairs
+    .map(([value, label]) => `<option value="${esc(value)}"${value === selected ? " selected" : ""}>${esc(label)}</option>`)
+    .join("");
+}
+
+function edgeRow(label: string, key: string, edge: EdgeSensor): string {
+  return `<label class="block"><span>${label}</span><select data-edge="${key}">${options(SLIDE_ACTIONS, slideValue(edge))}</select></label>`;
+}
+
+function cornerBlock(title: string, key: string, actions: CornerActions): string {
+  const people = peers
+    .filter((peer) => peer.name)
+    .map((peer) => [peer.id, peer.name] as const);
+  const hold = [["", "No one"], ...people] as const;
+  return `<div class="corner-card">
+    <strong>${title}</strong>
+    <label class="block"><span>Click</span><select data-corner="${key}" data-click="single">${options(CLICK_ACTIONS, actions.single || "none")}</select></label>
+    <label class="block"><span>Double click</span><select data-corner="${key}" data-click="double">${options(CLICK_ACTIONS, actions.double || "none")}</select></label>
+    <label class="block"><span>Hold to tap</span><select data-corner="${key}" data-click="hold">${options(hold, actions.holdPeer || "")}</select></label>
+  </div>`;
+}
+
+function trackpadPanel(current: Settings): string {
+  const pad = trackpadOf(current);
+  const modifier = pad.requireModifier || "none";
+  return `
+    <p class="note">Slide an edge for volume, brightness, or the current track. Rest a finger in a corner to tap someone on your team. A quick click still does whatever you set below it.</p>
+    <div class="toggle-row">
+      <div><strong>Trackpad edges</strong><small>Left is brightness and right is volume until you change them</small></div>
+      <button id="trackpad-enabled" class="switch" type="button" role="switch" aria-checked="${pad.enabled ? "true" : "false"}"><span class="knob"></span></button>
+    </div>
+    <div class="pad-map" aria-hidden="true">
+      <span class="pad-edge top">${esc(slideValue(pad.edges.top))}</span>
+      <span class="pad-edge left">${esc(slideValue(pad.edges.left))}</span>
+      <span class="pad-face"></span>
+      <span class="pad-edge right">${esc(slideValue(pad.edges.right))}</span>
+      <span class="pad-edge bottom">${esc(slideValue(pad.edges.bottom))}</span>
+    </div>
+    <div class="edge-grid">
+      ${edgeRow("Left edge", "left", pad.edges.left)}
+      ${edgeRow("Right edge", "right", pad.edges.right)}
+      ${edgeRow("Top edge", "top", pad.edges.top)}
+      ${edgeRow("Bottom edge", "bottom", pad.edges.bottom)}
+    </div>
+    <label class="block"><span>Sensitivity ${pad.sensitivity.toFixed(1)}</span>
+      <input id="trackpad-sensitivity" type="range" min="0.4" max="2" step="0.1" value="${pad.sensitivity}" />
+    </label>
+    <label class="block"><span>Require a key</span>
+      <select id="trackpad-modifier">${options(
+        [
+          ["none", "None"],
+          ["fn", "FN"],
+          ["option", "Option"],
+          ["control", "Control"],
+        ],
+        modifier,
+      )}</select>
+    </label>
+    <div class="toggle-row"><div><strong>Flip vertical edges</strong><small>For a trackpad that reports up and down backwards</small></div>
+      <button id="trackpad-flip" class="switch" type="button" role="switch" aria-checked="${pad.flipVerticalEdges ? "true" : "false"}"><span class="knob"></span></button></div>
+    <div class="toggle-row"><div><strong>Keep the pointer still</strong><small>The cursor stays put while you slide</small></div>
+      <button id="trackpad-freeze" class="switch" type="button" role="switch" aria-checked="${pad.freezeCursor ? "true" : "false"}"><span class="knob"></span></button></div>
+    <div class="toggle-row"><div><strong>Precise sliding</strong><small>Quarter steps. Hold Shift and Option for the same thing when this is off</small></div>
+      <button id="trackpad-precise" class="switch" type="button" role="switch" aria-checked="${pad.preciseSliding ? "true" : "false"}"><span class="knob"></span></button></div>
+    <div class="toggle-row"><div><strong>Haptics</strong><small>A tick each time the level crosses a step</small></div>
+      <button id="trackpad-haptics" class="switch" type="button" role="switch" aria-checked="${pad.hapticsEnabled ? "true" : "false"}"><span class="knob"></span></button></div>
+    <label class="block"><span>Haptic strength</span>
+      <select id="trackpad-strength">${options(
+        [
+          ["light", "Light"],
+          ["medium", "Medium"],
+          ["strong", "Strong"],
+        ],
+        pad.hapticStrength || "medium",
+      )}</select>
+    </label>
+    <div class="toggle-row"><div><strong>Reverse media swipes</strong></div>
+      <button id="trackpad-reverse" class="switch" type="button" role="switch" aria-checked="${pad.mediaStripReverse ? "true" : "false"}"><span class="knob"></span></button></div>
+    <div class="toggle-row"><div><strong>Show the level</strong><small>A small panel while you slide</small></div>
+      <button id="trackpad-hud" class="switch" type="button" role="switch" aria-checked="${pad.showHUD ? "true" : "false"}"><span class="knob"></span></button></div>
+    <div class="corner-grid">
+      ${cornerBlock("Top left", "topLeft", pad.corners.topLeft)}
+      ${cornerBlock("Top right", "topRight", pad.corners.topRight)}
+      ${cornerBlock("Bottom left", "bottomLeft", pad.corners.bottomLeft)}
+      ${cornerBlock("Bottom right", "bottomRight", pad.corners.bottomRight)}
+    </div>`;
+}
+
+function bindTrackpad() {
+  if (!settings || tab !== "trackpad") return;
+  const pad = trackpadOf(settings);
+  const save = () => {
+    void persist();
+    render();
+  };
+  const toggle = (id: string, apply: (value: boolean) => void) => {
+    const button = document.getElementById(id);
+    if (!button) return;
+    button.onclick = () => {
+      const next = button.getAttribute("aria-checked") !== "true";
+      apply(next);
+      save();
+    };
+  };
+  toggle("trackpad-enabled", (value) => (pad.enabled = value));
+  toggle("trackpad-flip", (value) => (pad.flipVerticalEdges = value));
+  toggle("trackpad-freeze", (value) => (pad.freezeCursor = value));
+  toggle("trackpad-precise", (value) => (pad.preciseSliding = value));
+  toggle("trackpad-haptics", (value) => (pad.hapticsEnabled = value));
+  toggle("trackpad-reverse", (value) => (pad.mediaStripReverse = value));
+  toggle("trackpad-hud", (value) => (pad.showHUD = value));
+
+  for (const select of root.querySelectorAll<HTMLSelectElement>("select[data-edge]")) {
+    select.onchange = () => {
+      const key = select.dataset.edge as keyof TrackpadSettings["edges"] | undefined;
+      if (!key) return;
+      const value = select.value;
+      const edge = pad.edges[key];
+      if (value === "off") edge.enabled = false;
+      else {
+        edge.enabled = true;
+        edge.action = value;
+      }
+      save();
+    };
+  }
+  const modifier = document.getElementById("trackpad-modifier") as HTMLSelectElement | null;
+  if (modifier) {
+    modifier.onchange = () => {
+      pad.requireModifier = modifier.value;
+      save();
+    };
+  }
+  const strength = document.getElementById("trackpad-strength") as HTMLSelectElement | null;
+  if (strength) {
+    strength.onchange = () => {
+      pad.hapticStrength = strength.value;
+      save();
+    };
+  }
+  const sensitivity = document.getElementById("trackpad-sensitivity") as HTMLInputElement | null;
+  if (sensitivity) {
+    sensitivity.oninput = () => {
+      pad.sensitivity = Number(sensitivity.value);
+      const label = sensitivity.closest("label")?.querySelector("span");
+      if (label) label.textContent = `Sensitivity ${pad.sensitivity.toFixed(1)}`;
+    };
+    sensitivity.onchange = () => save();
+  }
+  for (const select of root.querySelectorAll<HTMLSelectElement>("select[data-corner]")) {
+    select.onchange = () => {
+      const key = select.dataset.corner as keyof TrackpadSettings["corners"] | undefined;
+      const which = select.dataset.click;
+      if (!key || !which) return;
+      const actions = pad.corners[key];
+      if (which === "hold") actions.holdPeer = select.value;
+      else if (which === "single") actions.single = select.value;
+      else actions.double = select.value;
+      save();
+    };
+  }
+}
+
 function render() {
   const addField = document.getElementById("add-peer") as HTMLInputElement | null;
   const keepAddFocus = addField != null && document.activeElement === addField;
@@ -554,7 +818,9 @@ function render() {
           <span class="knob"></span>
         </button>
       </div>`
-          : `
+          : tab === "trackpad"
+            ? trackpadPanel(settings)
+            : `
       <div>
         <div class="swatch-label">Appearance</div>
         <div class="choices">
@@ -717,6 +983,7 @@ function render() {
     armingShortcut = true;
     render();
   });
+  bindTrackpad();
   const login = document.getElementById("login");
   if (login) {
     login.onclick = () => {

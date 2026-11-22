@@ -75,6 +75,7 @@
       "infoPlist": "Info.plist",
       "signingIdentity": "-",
       "hardenedRuntime": false,
+      "frameworks": ["../native/gestures/.build/release/libTapGestures.dylib"],
       "dmg": {
         "background": "dmg/background.png",
         "windowSize": { "width": 860, "height": 540 },

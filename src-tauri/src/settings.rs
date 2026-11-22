@@ -31,6 +31,165 @@ fn default_theme() -> String {
     "system".into()
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_sensitivity() -> f64 {
+    1.0
+}
+
+fn default_haptic() -> String {
+    "medium".into()
+}
+
+fn default_modifier() -> String {
+    "none".into()
+}
+
+fn edge_sensor(action: &str, enabled: bool) -> EdgeSensor {
+    EdgeSensor {
+        enabled,
+        action: action.into(),
+        start: 0.0,
+        end: 1.0,
+        thickness: 0.18,
+    }
+}
+
+/// One band along the trackpad. Field names match the Swift `EdgeSensor` JSON.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EdgeSensor {
+    pub enabled: bool,
+    pub action: String,
+    pub start: f64,
+    pub end: f64,
+    pub thickness: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EdgeMap {
+    pub left: EdgeSensor,
+    pub right: EdgeSensor,
+    pub top: EdgeSensor,
+    pub bottom: EdgeSensor,
+}
+
+impl Default for EdgeMap {
+    fn default() -> Self {
+        Self {
+            left: edge_sensor("brightness", true),
+            right: edge_sensor("volume", true),
+            top: edge_sensor("media", false),
+            bottom: edge_sensor("media", true),
+        }
+    }
+}
+
+/// Clicks and the person a resting finger taps. JSON matches Swift `CornerActions`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CornerActions {
+    #[serde(default = "default_click")]
+    pub single: String,
+    #[serde(default = "default_click")]
+    pub double: String,
+    #[serde(default)]
+    pub hold_peer: String,
+}
+
+fn default_click() -> String {
+    "none".into()
+}
+
+impl Default for CornerActions {
+    fn default() -> Self {
+        Self {
+            single: default_click(),
+            double: default_click(),
+            hold_peer: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CornerMap {
+    pub top_left: CornerActions,
+    pub top_right: CornerActions,
+    pub bottom_left: CornerActions,
+    pub bottom_right: CornerActions,
+}
+
+impl Default for CornerMap {
+    fn default() -> Self {
+        let mut top_right = CornerActions::default();
+        top_right.double = "mute".into();
+        Self {
+            top_left: CornerActions::default(),
+            top_right,
+            bottom_left: CornerActions::default(),
+            bottom_right: CornerActions::default(),
+        }
+    }
+}
+
+/// Gesture settings. Serialized on their own and handed to the Swift library,
+/// whose `Settings` type decodes this same JSON.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackpadSettings {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub edges: EdgeMap,
+    #[serde(default)]
+    pub corners: CornerMap,
+    #[serde(default = "default_sensitivity")]
+    pub sensitivity: f64,
+    #[serde(default = "default_modifier")]
+    pub require_modifier: String,
+    #[serde(default)]
+    pub flip_vertical_edges: bool,
+    #[serde(default = "default_true")]
+    pub freeze_cursor: bool,
+    #[serde(default)]
+    pub precise_sliding: bool,
+    #[serde(default = "default_true")]
+    pub fine_control_with_modifiers: bool,
+    #[serde(default = "default_true")]
+    pub haptics_enabled: bool,
+    #[serde(default = "default_haptic")]
+    pub haptic_strength: String,
+    #[serde(default)]
+    pub media_strip_reverse: bool,
+    /// Swift decodes the property name `showHUD`.
+    #[serde(default = "default_true", rename = "showHUD")]
+    pub show_hud: bool,
+}
+
+impl Default for TrackpadSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            edges: EdgeMap::default(),
+            corners: CornerMap::default(),
+            sensitivity: 1.0,
+            require_modifier: default_modifier(),
+            flip_vertical_edges: false,
+            freeze_cursor: true,
+            precise_sliding: false,
+            fine_control_with_modifiers: true,
+            haptics_enabled: true,
+            haptic_strength: default_haptic(),
+            media_strip_reverse: false,
+            show_hud: true,
+        }
+    }
+}
+
 /// Colors assigned automatically. Kept stable so people without a saved color
 /// do not change color when the chooser changes.
 const AUTO_COLORS: [&str; 6] = [
@@ -98,6 +257,9 @@ pub struct Settings {
     /// An empty string means the user turned it off.
     #[serde(default)]
     pub roster_shortcut: Option<String>,
+    /// Mac trackpad gestures. Ignored on Linux, where the library is not built.
+    #[serde(default)]
+    pub trackpad: TrackpadSettings,
 }
 
 impl Default for Settings {
@@ -129,6 +291,7 @@ impl Default for Settings {
             theme: default_theme(),
             peer_keys: HashMap::new(),
             roster_shortcut: None,
+            trackpad: TrackpadSettings::default(),
         }
     }
 }

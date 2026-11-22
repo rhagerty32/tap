@@ -36,6 +36,7 @@ hostname = "0.4"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+libloading = "0.8"
 objc2 = "0.5"
 window-vibrancy = "0.6"
 block2 = "0.6"

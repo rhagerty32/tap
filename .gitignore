@@ -9,6 +9,7 @@ lerna-debug.log*
 
 node_modules
 dist
+native/gestures/.build
 dist-ssr
 *.local
 

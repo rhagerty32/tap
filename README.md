@@ -22,6 +22,7 @@ Built with **Tauri v2** (Rust core + lightweight TypeScript UI).
 - **Team discovery** via shared team key + Tailscale tailnet, with mDNS on the local network and optional manual host fallback.
 - **Signed messages** (HMAC-SHA256) with timestamp skew and nonce replay protection; optional **Tailnet only** mode (100.64.0.0/10).
 - **Keyboard shortcuts** for opening the team list and holding a teammate's assigned key (platform-specific).
+- **Trackpad edges on a Mac.** Slide an edge for volume, brightness, or the current track. Rest a finger in a corner to tap the person you bound there. The gesture engine is a Swift library inside the Mac app; Linux builds leave it out. Settings live on the Trackpad tab.
 - **No telemetry**—settings and keys stay on your machines.
 
 Default UDP port: **37561**.
