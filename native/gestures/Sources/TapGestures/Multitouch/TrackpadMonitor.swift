@@ -277,7 +277,11 @@ public final class TrackpadMonitor {
                     id: record.identifier,
                     x: Double(record.normalized.position.x),
                     y: y,
-                    isTouching: record.isTouching
+                    isTouching: record.isTouching,
+                    size: Double(record.size),
+                    majorAxis: Double(record.majorAxis),
+                    minorAxis: Double(record.minorAxis),
+                    density: Double(record.density)
                 )
             )
         }

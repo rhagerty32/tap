@@ -10,12 +10,31 @@ public struct TouchContact: Sendable, Equatable {
     /// 0 = closest to you, 1 = closest to the screen.
     public var y: Double
     public var isTouching: Bool
+    /// Contact area reported by the trackpad. Unused by the gesture rules.
+    public var size: Double
+    /// Long axis of the contact. A fingertip is much smaller than a palm.
+    public var majorAxis: Double
+    public var minorAxis: Double
+    public var density: Double
 
-    public init(id: Int32, x: Double, y: Double, isTouching: Bool) {
+    public init(
+        id: Int32,
+        x: Double,
+        y: Double,
+        isTouching: Bool,
+        size: Double = 0,
+        majorAxis: Double = 0,
+        minorAxis: Double = 0,
+        density: Double = 0
+    ) {
         self.id = id
         self.x = x
         self.y = y
         self.isTouching = isTouching
+        self.size = size
+        self.majorAxis = majorAxis
+        self.minorAxis = minorAxis
+        self.density = density
     }
 }
 

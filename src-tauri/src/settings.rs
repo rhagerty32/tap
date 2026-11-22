@@ -2,9 +2,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use uuid::Uuid;
-
 pub const DEFAULT_PORT: u16 = 37561;
+
+/// Signing key used when the team key is blank. It is not a secret. Every Tap
+/// that left the key empty accepts the others, on the local network and on Tailscale.
+pub const OPEN_TEAM_KEY: &[u8] = b"tap-open";
 pub const DEFAULT_COLOR: &str = "#3b82f6";
 
 fn default_port() -> u16 {
@@ -37,6 +39,14 @@ fn default_true() -> bool {
 
 fn default_sensitivity() -> f64 {
     1.0
+}
+
+fn default_typing_pause() -> f64 {
+    0.4
+}
+
+fn default_max_touch_size() -> f64 {
+    18.0
 }
 
 fn default_haptic() -> String {
@@ -98,6 +108,12 @@ pub struct CornerActions {
     pub double: String,
     #[serde(default)]
     pub hold_peer: String,
+    /// `raycast://` link for a single click. Used when `single` is `raycast`.
+    #[serde(default)]
+    pub raycast_single: String,
+    /// `raycast://` link for a double click. Used when `double` is `raycast`.
+    #[serde(default)]
+    pub raycast_double: String,
 }
 
 fn default_click() -> String {
@@ -110,6 +126,8 @@ impl Default for CornerActions {
             single: default_click(),
             double: default_click(),
             hold_peer: String::new(),
+            raycast_single: String::new(),
+            raycast_double: String::new(),
         }
     }
 }
@@ -149,6 +167,14 @@ pub struct TrackpadSettings {
     pub corners: CornerMap,
     #[serde(default = "default_sensitivity")]
     pub sensitivity: f64,
+    #[serde(default = "default_true")]
+    pub typing_pause_enabled: bool,
+    #[serde(default = "default_typing_pause")]
+    pub typing_pause: f64,
+    #[serde(default = "default_true")]
+    pub palm_rejection_enabled: bool,
+    #[serde(default = "default_max_touch_size")]
+    pub max_touch_size: f64,
     #[serde(default = "default_modifier")]
     pub require_modifier: String,
     #[serde(default)]
@@ -177,6 +203,10 @@ impl Default for TrackpadSettings {
             edges: EdgeMap::default(),
             corners: CornerMap::default(),
             sensitivity: 1.0,
+            typing_pause_enabled: true,
+            typing_pause: default_typing_pause(),
+            palm_rejection_enabled: true,
+            max_touch_size: default_max_touch_size(),
             require_modifier: default_modifier(),
             flip_vertical_edges: false,
             freeze_cursor: true,
@@ -203,10 +233,6 @@ pub fn canonical_color(color: &str) -> Option<String> {
         return None;
     }
     Some(format!("#{hex}").to_ascii_uppercase())
-}
-
-pub fn generate_team_key() -> String {
-    Uuid::new_v4().simple().to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -568,11 +594,21 @@ pub fn save_settings(settings: &Settings) -> Result<(), String> {
     fs::write(path, data).map_err(|e| e.to_string())
 }
 
+pub fn open_network(settings: &Settings) -> bool {
+    settings.team_key.trim().is_empty()
+}
+
+/// Tailscale-only applies once a team key is set. A blank key includes the local network too.
+pub fn tailnet_restricted(settings: &Settings) -> bool {
+    settings.tailnet_only && !open_network(settings)
+}
+
 pub fn team_key_bytes(settings: &Settings) -> Option<Vec<u8>> {
-    if settings.team_key.trim().is_empty() {
-        None
+    let key = settings.team_key.trim();
+    if key.is_empty() {
+        Some(OPEN_TEAM_KEY.to_vec())
     } else {
-        Some(settings.team_key.as_bytes().to_vec())
+        Some(key.as_bytes().to_vec())
     }
 }
 

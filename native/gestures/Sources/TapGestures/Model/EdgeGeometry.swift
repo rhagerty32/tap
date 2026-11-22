@@ -56,6 +56,13 @@ public struct EdgeGeometry: Sendable {
         self.init(edges: settings.edges)
     }
 
+    /// True when the point sits inside this edge's band, including its start, end, and thickness.
+    public func contains(_ point: CGPoint, edge: Edge) -> Bool {
+        let sensor = edges[edge]
+        guard sensor.enabled else { return false }
+        return contains(point, edge: edge, sensor: sensor)
+    }
+
     /// Which enabled band contains the point. The closest outer edge wins a tie.
     public func edge(at point: CGPoint) -> Edge? {
         let x = Double(point.x)

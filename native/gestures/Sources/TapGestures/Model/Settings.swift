@@ -99,6 +99,7 @@ public enum ClickAction: String, Codable, CaseIterable, Sendable, Identifiable {
     case playPause
     case next
     case previous
+    case raycast
 
     public var id: String { rawValue }
 
@@ -109,12 +110,13 @@ public enum ClickAction: String, Codable, CaseIterable, Sendable, Identifiable {
         case .playPause: return "Play / pause"
         case .next: return "Next track"
         case .previous: return "Previous track"
+        case .raycast: return "Raycast"
         }
     }
 
     public var command: MediaCommand? {
         switch self {
-        case .none: return nil
+        case .none, .raycast: return nil
         case .mute: return .mute
         case .playPause: return .playPause
         case .next: return .next
@@ -200,15 +202,27 @@ public struct CornerActions: Codable, Equatable, Sendable {
     public var double: ClickAction
     /// Peer id held while a finger rests in this corner. Empty means the corner does not tap anyone.
     public var holdPeer: String
+    /// `raycast://` link opened by a single click. Used only when `single` is `.raycast`.
+    public var raycastSingle: String
+    /// `raycast://` link opened by a double click. Used only when `double` is `.raycast`.
+    public var raycastDouble: String
 
-    public init(single: ClickAction = .none, double: ClickAction = .none, holdPeer: String = "") {
+    public init(
+        single: ClickAction = .none,
+        double: ClickAction = .none,
+        holdPeer: String = "",
+        raycastSingle: String = "",
+        raycastDouble: String = ""
+    ) {
         self.single = single
         self.double = double
         self.holdPeer = holdPeer
+        self.raycastSingle = raycastSingle
+        self.raycastDouble = raycastDouble
     }
 
     private enum CodingKeys: String, CodingKey {
-        case single, double, holdPeer
+        case single, double, holdPeer, raycastSingle, raycastDouble
     }
 
     public init(from decoder: Decoder) throws {
@@ -216,6 +230,8 @@ public struct CornerActions: Codable, Equatable, Sendable {
         single = try c.decodeIfPresent(ClickAction.self, forKey: .single) ?? .none
         double = try c.decodeIfPresent(ClickAction.self, forKey: .double) ?? .none
         holdPeer = try c.decodeIfPresent(String.self, forKey: .holdPeer) ?? ""
+        raycastSingle = try c.decodeIfPresent(String.self, forKey: .raycastSingle) ?? ""
+        raycastDouble = try c.decodeIfPresent(String.self, forKey: .raycastDouble) ?? ""
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -223,9 +239,19 @@ public struct CornerActions: Codable, Equatable, Sendable {
         try c.encode(single, forKey: .single)
         try c.encode(double, forKey: .double)
         try c.encode(holdPeer, forKey: .holdPeer)
+        try c.encode(raycastSingle, forKey: .raycastSingle)
+        try c.encode(raycastDouble, forKey: .raycastDouble)
     }
 
-    public var hasAction: Bool { single != .none || double != .none }
+    public var hasAction: Bool {
+        Self.armed(single, link: raycastSingle) || Self.armed(double, link: raycastDouble)
+    }
+
+    /// A Raycast click only counts once a link is chosen. Until then the corner still slides.
+    private static func armed(_ action: ClickAction, link: String) -> Bool {
+        if action == .raycast { return link.hasPrefix("raycast://") }
+        return action != .none
+    }
 
     public var holdsSomeone: Bool { !holdPeer.isEmpty }
 
@@ -329,6 +355,14 @@ public struct Settings: Codable, Equatable, Sendable {
     public var corners: CornerMap = .factory
     /// Multiplies how far a slide has to travel to cover the full range.
     public var sensitivity: Double = 1.0
+    /// Ignore a touch that lands shortly after a key, until that touch lifts.
+    public var typingPauseEnabled: Bool = true
+    /// How long after the last key a new touch is ignored.
+    public var typingPause: Double = 0.4
+    /// Ignore a contact wider than `maxTouchSize`.
+    public var palmRejectionEnabled: Bool = true
+    /// Major-axis cutoff. Wider contacts are treated as a palm.
+    public var maxTouchSize: Double = 18
     /// Require a modifier key to be held before an edge starts responding.
     public var requireModifier: ModifierRequirement = .none
     /// Some trackpads report the vertical axis the other way round.
@@ -366,6 +400,10 @@ public struct Settings: Codable, Equatable, Sendable {
         edges = Self.migratedEdges(from: decoder, defaults: d)
         corners = Self.migratedCorners(from: decoder, defaults: d)
         sensitivity = try c.decodeIfPresent(Double.self, forKey: .sensitivity) ?? d.sensitivity
+        typingPauseEnabled = try c.decodeIfPresent(Bool.self, forKey: .typingPauseEnabled) ?? d.typingPauseEnabled
+        typingPause = try c.decodeIfPresent(Double.self, forKey: .typingPause) ?? d.typingPause
+        palmRejectionEnabled = try c.decodeIfPresent(Bool.self, forKey: .palmRejectionEnabled) ?? d.palmRejectionEnabled
+        maxTouchSize = try c.decodeIfPresent(Double.self, forKey: .maxTouchSize) ?? d.maxTouchSize
         requireModifier = try c.decodeIfPresent(ModifierRequirement.self, forKey: .requireModifier) ?? d.requireModifier
         flipVerticalEdges = try c.decodeIfPresent(Bool.self, forKey: .flipVerticalEdges) ?? d.flipVerticalEdges
         freezeCursor = try c.decodeIfPresent(Bool.self, forKey: .freezeCursor) ?? d.freezeCursor

@@ -108,6 +108,10 @@ html[data-theme="dark"] body.app.preview {
   background: var(--surface);
   backdrop-filter: blur(30px);
   -webkit-backdrop-filter: blur(30px);
+  /* A mask makes WebKit clip the blur to the radius. Without it the blur
+     paints a second, lighter edge just under the card until the next click. */
+  -webkit-mask-image: linear-gradient(#000, #000);
+  mask-image: linear-gradient(#000, #000);
   box-shadow: inset 0 0 0 1px var(--stroke);
   padding: 8px 0 10px;
   display: flex;

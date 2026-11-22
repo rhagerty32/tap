@@ -8,6 +8,7 @@ mod overlay;
 mod overlay_state;
 mod peer;
 mod protocol;
+mod raycast;
 mod settings;
 mod status;
 
@@ -20,7 +21,7 @@ use network::{resolve_hold_addrs, stable_sender_id, NetworkRuntime};
 use overlay_state::OverlayStateMachine;
 use parking_lot::Mutex;
 use settings::{
-    canonical_color, effective_dnd, generate_team_key, load_settings, normalize_glow,
+    canonical_color, effective_dnd, load_settings, normalize_glow,
     normalize_screens, normalize_theme, save_settings, settings_path, Settings,
 };
 use std::collections::HashMap;
@@ -269,10 +270,6 @@ fn list_peers(state: State<AppState>) -> Vec<PeerInfo> {
 
 #[tauri::command]
 fn hold_start(state: State<AppState>, peer_id: String, app: AppHandle) -> Result<(), String> {
-    let cfg = state.settings.lock().clone();
-    if team_key_missing(&cfg) {
-        return Err("Set a team key in Settings before tapping.".into());
-    }
     let addrs = resolve_hold_addrs(&state.peers.lock(), &peer_id);
     if addrs.is_empty() {
         return Err("Peer has no reachable address.".into());
@@ -304,10 +301,6 @@ fn preview_local(state: State<AppState>) -> Result<(), String> {
 fn sender_id(state: State<AppState>) -> String {
     let cfg = state.settings.lock().clone();
     stable_sender_id(&cfg.display_name)
-}
-
-pub(crate) fn team_key_missing(cfg: &Settings) -> bool {
-    cfg.team_key.trim().is_empty()
 }
 
 fn configure_autostart(app: &AppHandle, enabled: bool) -> Result<(), String> {
@@ -456,6 +449,8 @@ fn focus_popover(ns: *mut objc2::runtime::AnyObject) {
             return;
         }
         let _: () = objc2::msg_send![app, activateIgnoringOtherApps: objc2::runtime::Bool::YES];
+        // Becoming key is what draws the extra bottom edge. Clip again after.
+        polish_popover_window(ns);
     }
 }
 
@@ -998,6 +993,58 @@ fn configure_popover_window(window: &WebviewWindow) {
         // The panel is shown while Tap is inactive. Hiding on deactivate
         // would order it out immediately.
         let _: () = objc2::msg_send![ns, setHidesOnDeactivate: objc2::runtime::Bool::NO];
+        polish_popover_window(ns);
+    }
+}
+
+/// The key popover otherwise shows a second rounded edge under the card: the
+/// window's own fill, a point or two taller than the web content. Clear that
+/// fill and clip the content to the same corner as the card.
+#[cfg(target_os = "macos")]
+fn polish_popover_window(ns: *mut objc2::runtime::AnyObject) {
+    if ns.is_null() {
+        return;
+    }
+    unsafe {
+        let _: () = objc2::msg_send![ns, setOpaque: false];
+        if let Some(color_cls) = objc2::runtime::AnyClass::get("NSColor") {
+            let clear: *mut objc2::runtime::AnyObject = objc2::msg_send![color_cls, clearColor];
+            if !clear.is_null() {
+                let _: () = objc2::msg_send![ns, setBackgroundColor: clear];
+            }
+        }
+        let radius_sel = objc2::runtime::Sel::register("_setCornerRadius:");
+        let responds: objc2::runtime::Bool = objc2::msg_send![ns, respondsToSelector: radius_sel];
+        if responds.as_bool() {
+            let _: () = objc2::msg_send![ns, _setCornerRadius: 22.0f64];
+        }
+        let content: *mut objc2::runtime::AnyObject = objc2::msg_send![ns, contentView];
+        if !content.is_null() {
+            clip_popover_view(content);
+            let frame_view: *mut objc2::runtime::AnyObject = objc2::msg_send![content, superview];
+            if !frame_view.is_null() {
+                let _: () = objc2::msg_send![frame_view, setWantsLayer: true];
+                let layer: *mut objc2::runtime::AnyObject = objc2::msg_send![frame_view, layer];
+                if !layer.is_null() {
+                    let _: () = objc2::msg_send![layer, setBorderWidth: 0.0f64];
+                }
+            }
+        }
+        let _: () = objc2::msg_send![ns, invalidateShadow];
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn clip_popover_view(view: *mut objc2::runtime::AnyObject) {
+    unsafe {
+        let _: () = objc2::msg_send![view, setWantsLayer: true];
+        let layer: *mut objc2::runtime::AnyObject = objc2::msg_send![view, layer];
+        if layer.is_null() {
+            return;
+        }
+        let _: () = objc2::msg_send![layer, setCornerRadius: 22.0f64];
+        let _: () = objc2::msg_send![layer, setMasksToBounds: true];
+        let _: () = objc2::msg_send![layer, setBorderWidth: 0.0f64];
     }
 }
 
@@ -1117,6 +1164,7 @@ fn place_popover_under_menu_bar(window: &WebviewWindow, width: f64, height: f64)
             size: MacSize { width, height },
         };
         let _: () = objc2::msg_send![ns_window, setFrame: frame display: true];
+        polish_popover_window(ns_window);
     }
 }
 
@@ -1541,13 +1589,9 @@ pub fn status_probe_line() -> String {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let settings_file_existed = settings_path().exists();
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
     let mut loaded = load_settings();
-    let mut open_setup = !settings_file_existed;
-    if loaded.team_key.trim().is_empty() {
-        loaded.team_key = generate_team_key();
-        let _ = save_settings(&loaded);
-        open_setup = true;
-    }
+    let open_setup = !settings_file_existed;
     #[cfg(target_os = "linux")]
     if loaded.roster_shortcut.is_none() {
         loaded.roster_shortcut = Some(settings::DEFAULT_ROSTER_SHORTCUT.into());
@@ -1736,6 +1780,7 @@ pub fn run() {
             my_avatar,
             peer_avatar,
             list_displays,
+            raycast::raycast_catalog,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

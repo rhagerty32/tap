@@ -1,10 +1,10 @@
-//! Mac trackpad host. The Swift library in `native/gestures` reads the pad and
-//! changes volume, brightness, and media. This module loads it, pushes the
-//! saved settings across, and turns its callbacks into the Tap HUD and a hold.
+//! Mac trackpad host. The Swift library in `native/gestures` reads the pad,
+//! changes volume, brightness, and media, and draws the glass level panel.
+//! This module loads that library and turns a corner rest into a hold.
 
 use crate::network::resolve_hold_addrs;
 use crate::settings::{Settings, TrackpadSettings};
-use crate::{perform_alignment_haptic, set_tray_sending, team_key_missing, AppState};
+use crate::{perform_alignment_haptic, set_tray_sending, AppState};
 use libloading::{Library, Symbol};
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -158,9 +158,6 @@ extern "C" fn on_hold(corner: i32, phase: i32) {
 fn begin_corner_hold(app: &AppHandle, corner: i32) {
     let state = app.state::<AppState>();
     let settings = state.settings.lock().clone();
-    if team_key_missing(&settings) {
-        return;
-    }
     let peer_id = peer_for_corner(&settings.trackpad, corner);
     if peer_id.is_empty() {
         return;

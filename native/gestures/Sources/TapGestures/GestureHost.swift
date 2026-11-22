@@ -3,8 +3,8 @@ import Foundation
 import QuartzCore
 
 /// C ABI used by the Tap process. The library owns the trackpad, the level
-/// changes, and haptics. Tap owns the window that shows the level, and the
-/// network hold that a corner rest starts.
+/// changes, haptics, and the glass level panel. Tap owns the network hold that
+/// a corner rest starts.
 private final class GestureHost: SlideEngineDelegate {
     static let shared = GestureHost()
 
@@ -25,8 +25,6 @@ private final class GestureHost: SlideEngineDelegate {
     private var lastWallTime: TimeInterval = 0
     private var started = false
 
-    private var slideCallback: (@convention(c) (Int32, Int32, Double) -> Void)?
-    private var commandCallback: (@convention(c) (Int32, Double, Int32) -> Void)?
     private var holdCallback: (@convention(c) (Int32, Int32) -> Void)?
 
     private init() {
@@ -35,6 +33,9 @@ private final class GestureHost: SlideEngineDelegate {
             self?.engineConfiguration() ?? EngineConfiguration()
         }
         engine.modifiers = { ModifierState.current }
+        engine.keyAge = {
+            CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown)
+        }
         monitor.onFrame = { [weak self] frame in
             self?.ingest(frame)
         }
@@ -45,8 +46,8 @@ private final class GestureHost: SlideEngineDelegate {
         command: @escaping @convention(c) (Int32, Double, Int32) -> Void,
         hold: @escaping @convention(c) (Int32, Int32) -> Void
     ) -> Int32 {
-        slideCallback = slide
-        commandCallback = command
+        _ = slide
+        _ = command
         holdCallback = hold
         started = true
         ensureTimer()
@@ -166,6 +167,8 @@ private final class GestureHost: SlideEngineDelegate {
         config.edges = settings.edges
         config.corners = settings.corners
         config.sensitivity = settings.sensitivity
+        config.typingPause = settings.typingPauseEnabled ? settings.typingPause : 0
+        config.maxTouchSize = settings.palmRejectionEnabled ? settings.maxTouchSize : 0
         config.currentBrightness = brightness.level
         config.currentVolume = audio.level
         config.mediaStripReverse = settings.mediaStripReverse
@@ -190,8 +193,7 @@ private final class GestureHost: SlideEngineDelegate {
     // MARK: SlideEngineDelegate
 
     func slideEngine(_ engine: SlideEngine, didBeginSlide target: EdgeAction) {
-        guard showHUD() else { return }
-        slideCallback?(Self.code(for: target), 0, level(for: target))
+        presentLevel(target, level: level(for: target))
     }
 
     func slideEngine(_ engine: SlideEngine, didUpdateSlide target: EdgeAction, level: Double) {
@@ -201,15 +203,13 @@ private final class GestureHost: SlideEngineDelegate {
             case .volume: self.audio.setLevel(level)
             case .brightness: self.brightness.setLevel(level)
             }
-            guard self.showHUD() else { return }
             let shown = target == .volume ? self.audio.level : self.brightness.level
-            self.slideCallback?(Self.code(for: target), 1, shown)
+            self.presentLevel(target, level: shown)
         }
     }
 
     func slideEngine(_ engine: SlideEngine, didEndSlide target: EdgeAction, level: Double) {
-        guard showHUD() else { return }
-        slideCallback?(Self.code(for: target), 2, level)
+        presentLevel(target, level: level)
     }
 
     func slideEngine(_ engine: SlideEngine, didTick target: EdgeAction, level: Double) {
@@ -226,10 +226,14 @@ private final class GestureHost: SlideEngineDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
             guard let self, token == self.singleTapToken else { return }
             self.lock.lock()
-            let action = engine.takePendingSingle()
+            let pending = engine.takePendingSingle()
             self.lock.unlock()
-            guard let command = action?.command else { return }
-            self.perform(command)
+            guard let (action, link) = pending else { return }
+            if action == .raycast {
+                self.openRaycast(link)
+            } else if let command = action.command {
+                self.perform(command)
+            }
         }
     }
 
@@ -240,6 +244,11 @@ private final class GestureHost: SlideEngineDelegate {
         }
     }
 
+    func slideEngine(_ engine: SlideEngine, didOpenRaycast link: String) {
+        singleTapToken += 1
+        openRaycast(link)
+    }
+
     func slideEngine(_ engine: SlideEngine, didBeginHold corner: Corner) {
         holdCallback?(Self.code(for: corner), 1)
     }
@@ -248,23 +257,47 @@ private final class GestureHost: SlideEngineDelegate {
         holdCallback?(Self.code(for: corner), 0)
     }
 
+    private func openRaycast(_ link: String) {
+        guard link.hasPrefix("raycast://"), let url = URL(string: link) else { return }
+        DispatchQueue.main.async {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
     private func perform(_ command: MediaCommand) {
         switch command {
         case .playPause:
             MediaKeyController.shared.send(.playPause)
-            commandCallback?(0, 0, 0)
+            presentMedia(.playPause)
         case .next:
             MediaKeyController.shared.send(.next)
-            commandCallback?(1, 0, 0)
+            presentMedia(.next)
         case .previous:
             MediaKeyController.shared.send(.previous)
-            commandCallback?(2, 0, 0)
+            presentMedia(.previous)
         case .mute:
             audio.toggleMute()
             let (enabled, strength) = haptics()
             if enabled { Haptics.shared.buzz(strength) }
-            commandCallback?(3, audio.level, audio.isMuted ? 1 : 0)
+            presentLevel(.volume, level: audio.level)
         }
+    }
+
+    private func presentLevel(_ target: EdgeAction, level: Double) {
+        guard showHUD() else {
+            LevelHUD.shared.dismiss()
+            return
+        }
+        let muted = target == .volume && audio.isMuted
+        LevelHUD.shared.show(edge: target, level: level, muted: muted)
+    }
+
+    private func presentMedia(_ symbol: MediaSymbol) {
+        guard showHUD() else {
+            LevelHUD.shared.dismiss()
+            return
+        }
+        LevelHUD.shared.show(media: symbol)
     }
 
     private func level(for target: EdgeAction) -> Double {
@@ -272,10 +305,6 @@ private final class GestureHost: SlideEngineDelegate {
         case .volume: return audio.level
         case .brightness: return brightness.level
         }
-    }
-
-    private static func code(for target: EdgeAction) -> Int32 {
-        target == .volume ? 0 : 1
     }
 
     private static func code(for corner: Corner) -> Int32 {

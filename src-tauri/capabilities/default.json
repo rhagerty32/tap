@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Main Tap capability",
-  "windows": ["main", "settings", "overlay-*"],
+  "windows": ["main", "settings", "hud", "overlay-*"],
   "permissions": [
     "core:default",
     "core:event:default",

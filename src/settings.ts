@@ -47,7 +47,11 @@ type CornerActions = {
   single: string;
   double: string;
   holdPeer: string;
+  raycastSingle?: string;
+  raycastDouble?: string;
 };
+
+type RaycastCommand = { title: string; extension: string; url: string };
 
 type TrackpadSettings = {
   enabled: boolean;
@@ -59,6 +63,10 @@ type TrackpadSettings = {
     bottomRight: CornerActions;
   };
   sensitivity: number;
+  typingPauseEnabled: boolean;
+  typingPause: number;
+  palmRejectionEnabled: boolean;
+  maxTouchSize: number;
   requireModifier: string;
   flipVerticalEdges: boolean;
   freezeCursor: boolean;
@@ -486,7 +494,7 @@ function peopleRows(): PersonRow[] {
 }
 
 function cornerBlank(): CornerActions {
-  return { single: "none", double: "none", holdPeer: "" };
+  return { single: "none", double: "none", holdPeer: "", raycastSingle: "", raycastDouble: "" };
 }
 
 function sensor(action: string, enabled = true): EdgeSensor {
@@ -511,6 +519,10 @@ function defaultTrackpad(): TrackpadSettings {
       bottomRight: cornerBlank(),
     },
     sensitivity: 1,
+    typingPauseEnabled: true,
+    typingPause: 0.4,
+    palmRejectionEnabled: true,
+    maxTouchSize: 18,
     requireModifier: "none",
     flipVerticalEdges: false,
     freezeCursor: true,
@@ -525,7 +537,17 @@ function defaultTrackpad(): TrackpadSettings {
 
 function trackpadOf(current: Settings): TrackpadSettings {
   if (!current.trackpad) current.trackpad = defaultTrackpad();
-  return current.trackpad;
+  const pad = current.trackpad;
+  pad.typingPauseEnabled ??= true;
+  pad.typingPause ??= 0.4;
+  pad.palmRejectionEnabled ??= true;
+  pad.maxTouchSize ??= 18;
+  if (pad.flipVerticalEdges || pad.mediaStripReverse) {
+    pad.flipVerticalEdges = false;
+    pad.mediaStripReverse = false;
+    void persist();
+  }
+  return pad;
 }
 
 const SLIDE_ACTIONS = [
@@ -542,6 +564,34 @@ const CLICK_ACTIONS = [
   ["next", "Next track"],
   ["previous", "Previous track"],
 ] as const;
+
+let raycastInstalled = false;
+let raycastCommands: RaycastCommand[] = [];
+
+function clickActions(current: string): [string, string][] {
+  const pairs: [string, string][] = CLICK_ACTIONS.map(([value, label]) => [value, label]);
+  if (raycastInstalled || current === "raycast") pairs.push(["raycast", "Raycast"]);
+  return pairs;
+}
+
+function raycastChoices(current: string): [string, string][] {
+  const pairs: [string, string][] = [["", "Choose a command"]];
+  const known = new Set<string>();
+  const sorted = [...raycastCommands].sort(
+    (a, b) => a.extension.localeCompare(b.extension) || a.title.localeCompare(b.title) || a.url.localeCompare(b.url),
+  );
+  for (const command of sorted) {
+    if (known.has(command.url)) continue;
+    known.add(command.url);
+    pairs.push([command.url, `${command.title} · ${command.extension}`]);
+  }
+  if (current && !known.has(current)) pairs.splice(1, 0, [current, "Pasted link"]);
+  return pairs;
+}
+
+function raycastName(url: string): string {
+  return raycastCommands.find((command) => command.url === url)?.title || "Raycast";
+}
 
 function slideValue(edge: EdgeSensor): string {
   return edge.enabled ? edge.action : "off";
@@ -565,10 +615,15 @@ const ICONS = {
   brightness: `<svg width="13" height="13" viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="2.4" fill="currentColor"/><path d="M7 1.4v1.3M7 11.3v1.3M1.4 7h1.3M11.3 7h1.3M3 3l.9.9M10.1 10.1l.9.9M11 3l-.9.9M3.9 10.1 3 11" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>`,
   media: `<svg width="13" height="13" viewBox="0 0 14 14" aria-hidden="true"><path d="M3 2.6v8.8L8.6 7z" fill="currentColor"/><path d="M10.6 3v8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>`,
   off: `<svg width="13" height="13" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 7h7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>`,
+  info: `<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="5.25" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M7 6.3V10" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="7" cy="4.3" r="0.7" fill="currentColor"/></svg>`,
 };
 
 function sw(id: string, on: boolean, label: string): string {
   return `<button id="${id}" class="sw" type="button" role="switch" aria-checked="${on ? "true" : "false"}" aria-label="${esc(label)}"><span class="sw-knob"></span></button>`;
+}
+
+function info(text: string): string {
+  return `<span class="info" tabindex="0" aria-label="${esc(text)}">${ICONS.info}<span class="info-tip" role="tooltip">${esc(text)}</span></span>`;
 }
 
 function row(title: string, desc: string, control: string, cls = ""): string {
@@ -675,10 +730,23 @@ function labelOf(pairs: readonly (readonly [string, string])[], value: string): 
   return pairs.find(([v]) => v === value)?.[1] ?? value;
 }
 
+function bandBox(key: (typeof EDGES)[number][0], edge: EdgeSensor): string {
+  const span = Math.max(0, edge.end - edge.start) * 100;
+  const thick = Math.min(34, Math.max(8, edge.thickness * 100));
+  const start = edge.start * 100;
+  const fromTop = (1 - edge.end) * 100;
+  if (key === "left") return `left:0;width:${thick}%;top:${fromTop}%;height:${span}%`;
+  if (key === "right") return `right:0;width:${thick}%;top:${fromTop}%;height:${span}%`;
+  if (key === "top") return `top:0;height:${thick}%;left:${start}%;width:${span}%`;
+  return `bottom:0;height:${thick}%;left:${start}%;width:${span}%`;
+}
+
 function cornerSummary(actions: CornerActions): string {
   const parts: string[] = [];
-  if (actions.single && actions.single !== "none") parts.push(labelOf(CLICK_ACTIONS, actions.single));
-  if (actions.double && actions.double !== "none") parts.push(`${labelOf(CLICK_ACTIONS, actions.double)} ×2`);
+  if (actions.single === "raycast") parts.push(raycastName(actions.raycastSingle || ""));
+  else if (actions.single && actions.single !== "none") parts.push(labelOf(CLICK_ACTIONS, actions.single));
+  if (actions.double === "raycast") parts.push(`${raycastName(actions.raycastDouble || "")} ×2`);
+  else if (actions.double && actions.double !== "none") parts.push(`${labelOf(CLICK_ACTIONS, actions.double)} ×2`);
   if (actions.holdPeer) {
     const who = peers.find((peer) => peer.id === actions.holdPeer)?.name;
     parts.push(who ? `Tap ${who.split(" ")[0]}` : "Tap");
@@ -695,7 +763,8 @@ function padDiagram(pad: TrackpadSettings): string {
     return sel(`data-edge="${key}"`, label, SLIDE_ACTIONS, value, { icon: icon(value), cls: `pill ${key}` });
   };
   const bands = EDGES.map(
-    ([key]) => `<i class="band ${key}" data-on="${pad.edges[key].enabled ? "true" : "false"}"></i>`,
+    ([key]) =>
+      `<i class="band ${key}" data-edge-band="${key}" data-on="${pad.edges[key].enabled ? "true" : "false"}" style="${bandBox(key, pad.edges[key])}"></i>`,
   ).join("");
   const chips = CORNERS.map(
     ([key, name, pos]) =>
@@ -711,6 +780,30 @@ function padDiagram(pad: TrackpadSettings): string {
   </div>`;
 }
 
+function raycastLink(actions: CornerActions, which: "single" | "double"): string {
+  return (which === "single" ? actions.raycastSingle : actions.raycastDouble) || "";
+}
+
+function raycastPicker(corner: CornerKey, which: "single" | "double", actions: CornerActions): string {
+  if ((which === "single" ? actions.single : actions.double) !== "raycast") return "";
+  const link = raycastLink(actions, which);
+  const command = sel(
+    `data-corner="${corner}" data-raycast="${which}"`,
+    which === "single" ? "Raycast command" : "Raycast command for double click",
+    raycastChoices(link),
+    link,
+    { cls: "command" },
+  );
+  const paste = `<input class="input mono raycast" data-corner="${corner}" data-raycast-link="${which}" type="text" spellcheck="false" placeholder="raycast://extensions/…" value="${esc(link)}" aria-label="${which === "single" ? "Raycast link" : "Raycast link for double click"}" />`;
+  const installed = raycastInstalled
+    ? "Runs an installed Raycast command. Raycast asks the first time."
+    : "Raycast isn’t on this Mac, so this click won’t run.";
+  return (
+    subRow(true, "Command", installed, command) +
+    subRow(true, "Or paste a link", "In Raycast, press ⌘K and choose Copy Deeplink. That covers built-in commands too.", paste)
+  );
+}
+
 function trackpadPanel(current: Settings): string {
   const pad = trackpadOf(current);
   const cornerName = CORNERS.find(([key]) => key === padCorner)?.[1] ?? "";
@@ -721,12 +814,14 @@ function trackpadPanel(current: Settings): string {
   return `
     ${group("", row("Trackpad gestures", "Edge slides and corner actions on this Mac", sw("trackpad-enabled", pad.enabled, "Trackpad gestures")))}
     ${padDiagram(pad)}
-    <p class="pad-note">Pick what each edge does. Select a corner to set its actions below.</p>
+    <p class="pad-note">Drag a band to move it. Drag either end to change its length, or the inner edge to change how far it reaches onto the pad.</p>
     ${group(
       `${cornerName} corner`,
       `<div class="corner-tabs">${seg("data-corner-tab", "Corner", CORNERS.map(([key, name]) => [key, name] as const), padCorner)}</div>` +
-        row("Click", "", sel(`data-corner="${padCorner}" data-click="single"`, `${cornerName} click`, CLICK_ACTIONS, actions.single || "none")) +
-        row("Double click", "", sel(`data-corner="${padCorner}" data-click="double"`, `${cornerName} double click`, CLICK_ACTIONS, actions.double || "none")) +
+        row("Click", "", sel(`data-corner="${padCorner}" data-click="single"`, `${cornerName} click`, clickActions(actions.single || "none"), actions.single || "none")) +
+        raycastPicker(padCorner, "single", actions) +
+        row("Double click", "", sel(`data-corner="${padCorner}" data-click="double"`, `${cornerName} double click`, clickActions(actions.double || "none"), actions.double || "none")) +
+        raycastPicker(padCorner, "double", actions) +
         row("Rest a finger to tap", "Hold in this corner to tap someone on your team", sel(`data-corner="${padCorner}" data-click="hold"`, `${cornerName} hold`, hold, actions.holdPeer || "")),
     )}
     ${group(
@@ -752,9 +847,7 @@ function trackpadPanel(current: Settings): string {
           ),
         ) +
         row("Keep the pointer still", "The cursor stays put while you slide", sw("trackpad-freeze", pad.freezeCursor, "Keep the pointer still")) +
-        row("Precise sliding", "Quarter steps. With this off, hold Shift and Option for the same", sw("trackpad-precise", pad.preciseSliding, "Precise sliding")) +
-        row("Flip vertical edges", "For a trackpad that reports up and down backwards", sw("trackpad-flip", pad.flipVerticalEdges, "Flip vertical edges")) +
-        row("Reverse media swipes", "Swap which way is next and previous", sw("trackpad-reverse", pad.mediaStripReverse, "Reverse media swipes")),
+        row("Precise sliding", "Quarter steps. With this off, hold Shift and Option for the same", sw("trackpad-precise", pad.preciseSliding, "Precise sliding")),
     )}
     ${group(
       "Feedback",
@@ -775,7 +868,38 @@ function trackpadPanel(current: Settings): string {
           ),
         ) +
         row("Show the level", "A small panel while you slide", sw("trackpad-hud", pad.showHUD, "Show the level")),
+    )}
+    ${group(
+      "Accidental touches",
+      row(
+        "Pause after typing",
+        "A touch that lands after a key is ignored until it lifts",
+        sw("trackpad-typing", pad.typingPauseEnabled, "Pause after typing"),
+      ) +
+        subRow(
+          pad.typingPauseEnabled,
+          "Delay",
+          "How long after the last key",
+          `${range("trackpad-typing-pause", pad.typingPause, 0.15, 1, "Delay after a key")}<span id="trackpad-typing-pause-value" class="value">${pad.typingPause.toFixed(2)} s</span>`,
+        ) +
+        row(
+          "Ignore palms",
+          "Skip a touch wider than a fingertip",
+          sw("trackpad-palm", pad.palmRejectionEnabled, "Ignore palms"),
+        ) +
+        subRow(
+          pad.palmRejectionEnabled,
+          "Max width",
+          "Lower ignores more touches",
+          `${range("trackpad-palm-size", pad.maxTouchSize, 8, 36, "Maximum fingertip width")}<span id="trackpad-palm-size-value" class="value">${Math.round(pad.maxTouchSize)}</span>`,
+        ),
     )}`;
+}
+
+function range(id: string, value: number, min: number, max: number, label: string): string {
+  const pct = ((value - min) / (max - min)) * 100;
+  const step = max - min > 5 ? 1 : 0.05;
+  return `<input id="${id}" class="range" type="range" min="${min}" max="${max}" step="${step}" value="${value}" style="--p:${pct}%" aria-label="${esc(label)}" />`;
 }
 
 function bindTrackpad() {
@@ -794,12 +918,12 @@ function bindTrackpad() {
     };
   };
   toggle("trackpad-enabled", (value) => (pad.enabled = value));
-  toggle("trackpad-flip", (value) => (pad.flipVerticalEdges = value));
   toggle("trackpad-freeze", (value) => (pad.freezeCursor = value));
   toggle("trackpad-precise", (value) => (pad.preciseSliding = value));
   toggle("trackpad-haptics", (value) => (pad.hapticsEnabled = value));
-  toggle("trackpad-reverse", (value) => (pad.mediaStripReverse = value));
   toggle("trackpad-hud", (value) => (pad.showHUD = value));
+  toggle("trackpad-typing", (value) => (pad.typingPauseEnabled = value));
+  toggle("trackpad-palm", (value) => (pad.palmRejectionEnabled = value));
 
   for (const select of root.querySelectorAll<HTMLSelectElement>("select[data-edge]")) {
     select.onchange = () => {
@@ -842,7 +966,16 @@ function bindTrackpad() {
     };
     sensitivity.onchange = () => void persist();
   }
-  for (const select of root.querySelectorAll<HTMLSelectElement>("select[data-corner]")) {
+  bindRange("trackpad-typing-pause", 0.15, 1, (value) => {
+    pad.typingPause = value;
+    return `${value.toFixed(2)} s`;
+  });
+  bindRange("trackpad-palm-size", 8, 36, (value) => {
+    pad.maxTouchSize = value;
+    return `${Math.round(value)}`;
+  });
+  bindBandDrag(pad);
+  for (const select of root.querySelectorAll<HTMLSelectElement>("select[data-click]")) {
     select.onchange = () => {
       const key = select.dataset.corner as CornerKey | undefined;
       const which = select.dataset.click;
@@ -854,6 +987,146 @@ function bindTrackpad() {
       save();
     };
   }
+  for (const select of root.querySelectorAll<HTMLSelectElement>("select[data-raycast]")) {
+    select.onchange = () => {
+      const key = select.dataset.corner as CornerKey | undefined;
+      const which = select.dataset.raycast;
+      if (!key || (which !== "single" && which !== "double")) return;
+      const actions = pad.corners[key];
+      if (which === "single") actions.raycastSingle = select.value;
+      else actions.raycastDouble = select.value;
+      save();
+    };
+  }
+  for (const input of root.querySelectorAll<HTMLInputElement>("input[data-raycast-link]")) {
+    input.onchange = () => {
+      const key = input.dataset.corner as CornerKey | undefined;
+      const which = input.dataset.raycastLink;
+      if (!key || (which !== "single" && which !== "double")) return;
+      const link = input.value.trim();
+      if (link && !link.startsWith("raycast://")) {
+        input.value = raycastLink(pad.corners[key], which);
+        return;
+      }
+      const actions = pad.corners[key];
+      if (which === "single") actions.raycastSingle = link;
+      else actions.raycastDouble = link;
+      save();
+    };
+  }
+}
+
+function bindRange(id: string, min: number, max: number, apply: (value: number) => string) {
+  const input = document.getElementById(id) as HTMLInputElement | null;
+  if (!input) return;
+  input.oninput = () => {
+    const value = Number(input.value);
+    input.style.setProperty("--p", `${((value - min) / (max - min)) * 100}%`);
+    const label = document.getElementById(`${id}-value`);
+    if (label) label.textContent = apply(value);
+  };
+  input.onchange = () => void persist();
+}
+
+type BandKey = (typeof EDGES)[number][0];
+type BandHandle = "move" | "start" | "end" | "thickness";
+
+function bindBandDrag(pad: TrackpadSettings) {
+  const face = root.querySelector<HTMLElement>(".pad-face");
+  if (!face) return;
+  for (const band of root.querySelectorAll<HTMLElement>("[data-edge-band]")) {
+    band.onpointerdown = (event) => {
+      if (event.button !== 0) return;
+      const key = band.dataset.edgeBand as BandKey | undefined;
+      if (!key) return;
+      const sensor = pad.edges[key];
+      const rect = band.getBoundingClientRect();
+      const handle = bandHandle(key, rect, event.clientX, event.clientY);
+      const origin = pointAlong(key, face, event.clientX, event.clientY);
+      const snapshot = { ...sensor };
+      band.setPointerCapture(event.pointerId);
+      face.closest(".pad")?.classList.add("is-dragging");
+      band.style.cursor = bandCursor(key, handle, true);
+      const move = (next: PointerEvent) => {
+        const along = pointAlong(key, face, next.clientX, next.clientY);
+        const delta = along - origin;
+        const updated = { ...snapshot };
+        const length = snapshot.end - snapshot.start;
+        if (handle === "move") {
+          const start = clamp(snapshot.start + delta, 0, 1 - length);
+          updated.start = start;
+          updated.end = start + length;
+        } else if (handle === "start") {
+          updated.start = clamp(snapshot.start + delta, 0, snapshot.end - 0.12);
+        } else if (handle === "end") {
+          updated.end = clamp(snapshot.end + delta, snapshot.start + 0.12, 1);
+        } else {
+          updated.thickness = clamp(pointThickness(key, face, next.clientX, next.clientY), 0.08, 0.34);
+        }
+        pad.edges[key] = updated;
+        band.style.cssText = bandBox(key, updated);
+        band.style.cursor = bandCursor(key, handle, true);
+      };
+      const finish = () => {
+        band.removeEventListener("pointermove", move);
+        band.removeEventListener("pointerup", finish);
+        band.removeEventListener("pointercancel", finish);
+        face.closest(".pad")?.classList.remove("is-dragging");
+        void persist();
+      };
+      band.addEventListener("pointermove", move);
+      band.addEventListener("pointerup", finish);
+      band.addEventListener("pointercancel", finish);
+      event.preventDefault();
+    };
+    band.addEventListener("pointermove", (event) => {
+      if (face.closest(".pad")?.classList.contains("is-dragging")) return;
+      const key = band.dataset.edgeBand as BandKey | undefined;
+      if (!key) return;
+      const handle = bandHandle(key, band.getBoundingClientRect(), event.clientX, event.clientY);
+      band.style.cursor = bandCursor(key, handle, false);
+    });
+    band.addEventListener("pointerleave", () => {
+      if (!face.closest(".pad")?.classList.contains("is-dragging")) band.style.cursor = "";
+    });
+  }
+}
+
+function bandCursor(key: BandKey, handle: BandHandle, dragging: boolean): string {
+  if (handle === "move") return dragging ? "grabbing" : "grab";
+  const vertical = key === "left" || key === "right";
+  if (handle === "thickness") return vertical ? "ew-resize" : "ns-resize";
+  return vertical ? "ns-resize" : "ew-resize";
+}
+
+function pointAlong(key: BandKey, face: HTMLElement, clientX: number, clientY: number): number {
+  const rect = face.getBoundingClientRect();
+  if (key === "left" || key === "right") return 1 - (clientY - rect.top) / Math.max(rect.height, 1);
+  return (clientX - rect.left) / Math.max(rect.width, 1);
+}
+
+function pointThickness(key: BandKey, face: HTMLElement, clientX: number, clientY: number): number {
+  const rect = face.getBoundingClientRect();
+  if (key === "left") return (clientX - rect.left) / Math.max(rect.width, 1);
+  if (key === "right") return (rect.right - clientX) / Math.max(rect.width, 1);
+  if (key === "top") return (clientY - rect.top) / Math.max(rect.height, 1);
+  return (rect.bottom - clientY) / Math.max(rect.height, 1);
+}
+
+function bandHandle(key: BandKey, rect: DOMRect, clientX: number, clientY: number): BandHandle {
+  const margin = 14;
+  if (key === "left" || key === "right") {
+    if (Math.abs(clientY - rect.top) < margin) return "end";
+    if (Math.abs(clientY - rect.bottom) < margin) return "start";
+    if (key === "left" && Math.abs(clientX - rect.right) < margin) return "thickness";
+    if (key === "right" && Math.abs(clientX - rect.left) < margin) return "thickness";
+    return "move";
+  }
+  if (Math.abs(clientX - rect.left) < margin) return "start";
+  if (Math.abs(clientX - rect.right) < margin) return "end";
+  if (key === "top" && Math.abs(clientY - rect.bottom) < margin) return "thickness";
+  if (key === "bottom" && Math.abs(clientY - rect.top) < margin) return "thickness";
+  return "move";
 }
 
 function selectTab(next: Tab | undefined) {
@@ -897,14 +1170,6 @@ function render() {
               "Shown to your team",
               `<input id="name" class="input" type="text" value="${esc(settings.displayName)}" aria-label="Your name" data-fresh />`,
             ),
-        ) +
-        group(
-          "Team",
-          row(
-            "Team key",
-            "Use the same key on every computer in your team",
-            `<input id="key" class="input mono" type="text" value="${esc(settings.teamKey)}" spellcheck="false" aria-label="Team key" data-fresh /><button id="copy" class="btn icon" type="button" title="Copy team key" aria-label="Copy team key">${ICONS.copy}</button>`,
-          ),
         )
       : tab === "glow"
         ? group(
@@ -949,6 +1214,14 @@ function render() {
             }</div></section>`
         : tab === "team"
           ? group(
+              "Team",
+              row(
+                `Team key${info("Leave this blank to tap anyone on your local network or Tailscale. Set the same key on each computer to keep a team private.")}`,
+                "",
+                `<input id="key" class="input mono" type="text" value="${esc(settings.teamKey)}" spellcheck="false" placeholder="Anyone nearby" aria-label="Team key" data-fresh /><button id="copy" class="btn icon" type="button" title="Copy team key" aria-label="Copy team key">${ICONS.copy}</button>`,
+              ),
+            ) +
+            group(
               `People${people.length ? ` · ${people.length}` : ""}`,
               (people.length === 0
                 ? row("No one yet", "People show up here after Tap has seen them", "", "is-empty")
@@ -979,7 +1252,14 @@ function render() {
                 "Find people",
                 esc(refreshedLabel(refreshedAt)),
                 `<button id="refresh-people" class="btn" type="button" ${refreshBusy ? "disabled" : ""} data-fresh>${ICONS.refresh}<span>${refreshBusy ? "Refreshing…" : "Refresh"}</span></button>`,
-              ) + row("Tailscale only", "Only find people on your tailnet", sw("tailnet", settings.tailnetOnly, "Tailscale only")),
+              ) +
+              row(
+                "Tailscale only",
+                settings.teamKey.trim()
+                  ? "Only find people on your tailnet"
+                  : "Applies after you set a team key. Until then, your local network is included too.",
+                sw("tailnet", settings.tailnetOnly, "Tailscale only"),
+              ),
             )
           : tab === "trackpad"
             ? trackpadPanel(settings)
@@ -1060,7 +1340,7 @@ function render() {
   });
   const key = document.getElementById("key") as HTMLInputElement | null;
   key?.addEventListener("change", () => {
-    settings!.teamKey = key.value;
+    settings!.teamKey = key.value.trim();
     void persist();
   });
   const copy = document.getElementById("copy");
@@ -1497,6 +1777,18 @@ async function loadPeerPhoto(peer: TeamPeer) {
   }
 }
 
+async function loadRaycast() {
+  try {
+    const catalog = await invoke<{ installed: boolean; commands: RaycastCommand[] }>("raycast_catalog");
+    raycastInstalled = catalog.installed;
+    raycastCommands = catalog.commands;
+    if (tab === "trackpad") render();
+  } catch {
+    raycastInstalled = false;
+    raycastCommands = [];
+  }
+}
+
 async function boot() {
   if (preview) {
     settings = preview.settings;
@@ -1511,6 +1803,7 @@ async function boot() {
     displays = await invoke<string[]>("list_displays");
     photo = (await invoke<string | null>("my_avatar")) || "";
     peers = await invoke<TeamPeer[]>("list_peers");
+    if (isMac) void loadRaycast();
     if (linux) shortcutNote = await invoke<string>("roster_shortcut_error");
     void Promise.all(peers.map((peer) => loadPeerPhoto(peer)));
   } catch (err) {

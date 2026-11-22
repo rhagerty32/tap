@@ -218,7 +218,7 @@ function render() {
   const needsKeys = keyboardOpen && peers.length > 0 && peers.every((peer) => !peer.key);
   const rows =
     peers.length === 0
-      ? `<div class="empty"><strong>Nobody nearby yet</strong><p>Share your team key so teammates can find you.</p></div>`
+      ? `<div class="empty"><strong>Nobody nearby yet</strong><p>People running Tap on your network show up here.</p></div>`
       : peers
           .map((peer) => {
             const classes = [

@@ -12,6 +12,10 @@ public struct EngineConfiguration: Equatable, Sendable {
     public var requireModifier: ModifierRequirement = .none
     public var fineControlWithModifiers: Bool = true
     public var preciseSliding: Bool = false
+    /// Seconds after a key during which a new touch cannot start a gesture. 0 turns this off.
+    public var typingPause: Double = 0.4
+    /// Largest major axis still treated as a fingertip. A wider contact is ignored. 0 turns this off.
+    public var maxTouchSize: Double = 18
 
     public init() {}
 }
@@ -31,6 +35,8 @@ public protocol SlideEngineDelegate: AnyObject {
     /// Fired once every time the level crosses a haptic step.
     func slideEngine(_ engine: SlideEngine, didTick target: EdgeAction, level: Double)
     func slideEngine(_ engine: SlideEngine, didRecognize command: MediaCommand)
+    /// A corner click should open a Raycast command.
+    func slideEngine(_ engine: SlideEngine, didOpenRaycast link: String)
     /// A single click is waiting out the double-click window.
     func slideEngineDidArmSingleTap(_ engine: SlideEngine)
     /// A finger has rested in a corner long enough to tap a person.
@@ -50,6 +56,8 @@ public final class SlideEngine {
     public var configuration: () -> EngineConfiguration = { EngineConfiguration() }
     /// Live modifier state, used for the "require modifier" and fine-control options.
     public var modifiers: () -> ModifierState = { .current }
+    /// Seconds since the last key-down. Idle keyboards report a large value.
+    public var keyAge: () -> TimeInterval = { .infinity }
 
     private enum Kind {
         case slider(target: EdgeAction, edge: Edge, startLevel: Double)
@@ -72,11 +80,15 @@ public final class SlideEngine {
         var consumed: Bool
         var lostFrames: Int
         var holdStarted: Bool
+        var fingerID: Int32
     }
 
     private var gesture: Gesture?
+    /// Contacts that landed as a palm, or while typing. Ignored until they lift.
+    private var suppressed: Set<Int32> = []
     private var lastCornerTap: [Corner: TimeInterval] = [:]
     private var pendingSingle: ClickAction?
+    private var pendingRaycastLink = ""
 
     public init() {}
 
@@ -92,9 +104,13 @@ public final class SlideEngine {
     public func process(_ frame: TouchFrame) {
         let config = configuration()
         let active = frame.activeContacts
+        suppressed.formIntersection(Set(active.map(\.id)))
+        for contact in active where gesture?.fingerID != contact.id && isPalm(contact, config: config) {
+            suppressed.insert(contact.id)
+        }
 
         if var current = gesture {
-            if active.isEmpty {
+            guard let point = active.first(where: { $0.id == current.fingerID }) else {
                 current.lostFrames += 1
                 // A tap ends the moment the finger lifts; a slide survives a
                 // few dropped frames so it does not stop halfway (1.8 fix).
@@ -105,7 +121,15 @@ public final class SlideEngine {
                 return
             }
 
-            guard active.count == 1, let point = active.first else {
+            if shouldAbortForTyping(current, config: config) {
+                for contact in active { suppressed.insert(contact.id) }
+                cancel(current)
+                gesture = nil
+                return
+            }
+
+            let extras = active.filter { $0.id != current.fingerID && !suppressed.contains($0.id) }
+            guard extras.isEmpty else {
                 // Extra fingers mean the user wants a system gesture.
                 cancel(current)
                 gesture = nil
@@ -121,8 +145,14 @@ public final class SlideEngine {
             return
         }
 
-        guard active.count == 1, let point = active.first else { return }
-        begin(point: CGPoint(x: point.x, y: point.y), now: frame.timestamp, config: config)
+        if isTyping(config) {
+            for contact in active { suppressed.insert(contact.id) }
+            return
+        }
+
+        let fingers = active.filter { !suppressed.contains($0.id) }
+        guard fingers.count == 1, let point = fingers.first else { return }
+        begin(contact: point, now: frame.timestamp, config: config)
     }
 
     /// Advances a resting corner hold when the trackpad stops sending frames.
@@ -137,20 +167,27 @@ public final class SlideEngine {
         if let current = gesture { cancel(current) }
         gesture = nil
         pendingSingle = nil
+        pendingRaycastLink = ""
+        suppressed.removeAll()
     }
 
     /// Fires a single click once the double-click window has passed.
     /// Returns nil when a second tap already consumed it.
-    public func takePendingSingle() -> ClickAction? {
-        defer { pendingSingle = nil }
-        return pendingSingle
+    public func takePendingSingle() -> (ClickAction, String)? {
+        defer {
+            pendingSingle = nil
+            pendingRaycastLink = ""
+        }
+        guard let action = pendingSingle else { return nil }
+        return (action, pendingRaycastLink)
     }
 
     // MARK: - Gesture lifecycle
 
-    private func begin(point: CGPoint, now: TimeInterval, config: EngineConfiguration) {
+    private func begin(contact: TouchContact, now: TimeInterval, config: EngineConfiguration) {
+        let point = CGPoint(x: contact.x, y: contact.y)
         guard ModifierState.modifierRequirementSatisfied(config.requireModifier, by: modifiers()) else {
-            gesture = makeGesture(kind: .ignored, point: point, now: now, level: 0, fine: false, config: config)
+            gesture = makeGesture(kind: .ignored, contact: contact, point: point, now: now, level: 0, fine: false, config: config)
             return
         }
 
@@ -159,17 +196,18 @@ public final class SlideEngine {
 
         if let corner = geometry.corner(at: point),
            config.corners[corner].hasAction || config.corners[corner].holdsSomeone {
-            gesture = makeGesture(kind: .corner(corner), point: point, now: now, level: 0, fine: fine, config: config)
+            gesture = makeGesture(kind: .corner(corner), contact: contact, point: point, now: now, level: 0, fine: fine, config: config)
             return
         }
 
         guard let edge = geometry.edge(at: point) else {
-            gesture = makeGesture(kind: .ignored, point: point, now: now, level: 0, fine: false, config: config)
+            gesture = makeGesture(kind: .ignored, contact: contact, point: point, now: now, level: 0, fine: false, config: config)
             return
         }
 
         gesture = makeGesture(
             kind: kind(for: edge, config: config),
+            contact: contact,
             point: point,
             now: now,
             level: level(for: edge, config: config),
@@ -202,13 +240,11 @@ public final class SlideEngine {
         let dx = point.x - gesture.startX
         let dy = point.y - gesture.startY
 
-        // A click that starts moving becomes the slide underneath the corner.
-        // A hold that has already armed stays a hold until the finger lifts.
-        if case .corner = gesture.kind, !gesture.holdStarted, hypot(dx, dy) > 0.012 {
-            guard let edge = edgeForSlide(from: point, dx: dx, dy: dy, config: config) else {
-                gesture.kind = .ignored
-                return
-            }
+        // A click that starts moving becomes the slide underneath the corner,
+        // but only when the finger is actually inside that band. A narrowed
+        // band leaves the corner alone, so the tap or hold still happens.
+        if case .corner = gesture.kind, !gesture.holdStarted, hypot(dx, dy) > 0.012,
+           let edge = edgeForSlide(from: point, dx: dx, dy: dy, config: config) {
             gesture.kind = kind(for: edge, config: config)
             let level = level(for: edge, config: config)
             let steps = isFine(config: config) ? 64.0 : 16.0
@@ -270,13 +306,14 @@ public final class SlideEngine {
         }
     }
 
-    /// The enabled band a corner drag should become. The stronger axis wins,
-    /// and a disabled band falls through to the other axis.
+    /// The band a corner drag should become. The stronger axis wins when the
+    /// corner sits in two bands. A band the finger is outside of does not count.
     private func edgeForSlide(from point: CGPoint, dx: Double, dy: Double, config: EngineConfiguration) -> Edge? {
+        let geometry = EdgeGeometry(edges: config.edges)
         let vertical: Edge = point.x < 0.5 ? .left : .right
         let horizontal: Edge = point.y < 0.5 ? .bottom : .top
         let ordered = abs(dy) >= abs(dx) ? [vertical, horizontal] : [horizontal, vertical]
-        return ordered.first { config.edges[$0].enabled }
+        return ordered.first { geometry.contains(point, edge: $0) }
     }
 
     private func finish(_ gesture: Gesture, at now: TimeInterval, config: EngineConfiguration) {
@@ -303,13 +340,27 @@ public final class SlideEngine {
             if let previous = lastCornerTap[corner], now - previous < 0.45 {
                 lastCornerTap[corner] = -10
                 pendingSingle = nil
-                if let command = actions.double.command {
+                pendingRaycastLink = ""
+                if actions.double == .raycast {
+                    let link = actions.raycastDouble
+                    if link.hasPrefix("raycast://") {
+                        delegate?.slideEngine(self, didOpenRaycast: link)
+                    }
+                } else if let command = actions.double.command {
                     delegate?.slideEngine(self, didRecognize: command)
                 }
             } else {
                 lastCornerTap[corner] = now
-                if actions.single != .none {
+                if actions.single == .raycast {
+                    let link = actions.raycastSingle
+                    if link.hasPrefix("raycast://") {
+                        pendingSingle = .raycast
+                        pendingRaycastLink = link
+                        delegate?.slideEngineDidArmSingleTap(self)
+                    }
+                } else if actions.single != .none {
                     pendingSingle = actions.single
+                    pendingRaycastLink = ""
                     delegate?.slideEngineDidArmSingleTap(self)
                 }
             }
@@ -330,8 +381,22 @@ public final class SlideEngine {
 
     // MARK: - Helpers
 
+    private func isTyping(_ config: EngineConfiguration) -> Bool {
+        config.typingPause > 0 && keyAge() < config.typingPause
+    }
+
+    /// A slide that has already moved keeps going. A resting touch does not become a click or a hold.
+    private func shouldAbortForTyping(_ gesture: Gesture, config: EngineConfiguration) -> Bool {
+        isTyping(config) && !gesture.moved && !gesture.holdStarted
+    }
+
+    private func isPalm(_ contact: TouchContact, config: EngineConfiguration) -> Bool {
+        config.maxTouchSize > 0 && contact.majorAxis > config.maxTouchSize
+    }
+
     private func makeGesture(
         kind: Kind,
+        contact: TouchContact,
         point: CGPoint,
         now: TimeInterval,
         level: Double,
@@ -352,7 +417,8 @@ public final class SlideEngine {
             lastStep: Int((level * steps).rounded()),
             consumed: false,
             lostFrames: 0,
-            holdStarted: false
+            holdStarted: false,
+            fingerID: contact.id
         )
     }
 

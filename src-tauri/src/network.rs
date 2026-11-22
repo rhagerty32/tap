@@ -11,7 +11,9 @@ use crate::peer::{PeerRecord, PeerSource};
 use crate::protocol::{
     new_outgoing, sign_message, verify_message, MessageKind, ReplayGuard, RosterMember, TapMessage,
 };
-use crate::settings::{color_for_peer, effective_dnd, is_tailnet_ip, team_key_bytes, Settings};
+use crate::settings::{
+    color_for_peer, effective_dnd, is_tailnet_ip, tailnet_restricted, team_key_bytes, Settings,
+};
 use crate::status;
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use parking_lot::Mutex;
@@ -247,7 +249,7 @@ fn apply_inbound(
     src_ip: IpAddr,
     app: Option<&AppHandle>,
 ) -> InboundEffect {
-    if cfg.tailnet_only && !is_tailnet_ip(&src_ip) {
+    if tailnet_restricted(cfg) && !is_tailnet_ip(&src_ip) {
         return InboundEffect::Ignored;
     }
     let Some(key) = team_key_bytes(cfg) else {
@@ -791,7 +793,7 @@ pub(crate) fn start_local_preview(settings: &Settings) -> Result<(), String> {
     if settings.do_not_disturb {
         return Err("Turn off Do Not Disturb to preview on this Mac.".into());
     }
-    if settings.tailnet_only {
+    if tailnet_restricted(settings) {
         return Err("Turn off Accept only Tailscale IPs to preview on this Mac.".into());
     }
     let key =
@@ -919,7 +921,7 @@ fn spawn_presence(
             }
             {
                 let mut map = peers.lock();
-                // A tailnet machine is not a person until it answers with the team key.
+                // A tailnet machine is not a person until it answers.
                 map.retain(|_, peer| peer.source != PeerSource::Tailscale);
             }
             let tailnet = tailscale_targets(cfg.listen_port);
@@ -986,7 +988,7 @@ fn send_presence(
     let Ok(data) = serde_json::to_vec(&msg) else {
         return;
     };
-    if !cfg.tailnet_only {
+    if !tailnet_restricted(cfg) {
         broadcast(&socket, &data, cfg.listen_port);
     }
     let targets = {
@@ -1012,7 +1014,7 @@ fn presence_targets(
 ) -> Vec<SocketAddr> {
     for peer in peers.values() {
         for addr in &peer.addrs {
-            if cfg.tailnet_only && !is_tailnet_ip(&addr.ip()) {
+            if tailnet_restricted(cfg) && !is_tailnet_ip(&addr.ip()) {
                 continue;
             }
             if !targets.contains(addr) {
@@ -1363,6 +1365,33 @@ mod tests {
         );
         assert!(matches!(effect, InboundEffect::Ignored));
         assert!(matches!(overlay.snapshot(), OverlaySnapshot::Hidden));
+    }
+
+    #[test]
+    fn a_blank_team_key_accepts_anyone_on_the_local_network() {
+        let mut settings = preview_settings(9);
+        settings.team_key.clear();
+        settings.tailnet_only = true;
+        let mut overlay = OverlayStateMachine::default();
+        let mut peers = HashMap::new();
+        let mut replay = ReplayGuard::default();
+        let mut roster = RosterSync::default();
+        let mut msg = new_outgoing(MessageKind::Start, "alice", "Alice", "", "");
+        sign_message(&team_key_bytes(&settings).expect("open key"), &mut msg);
+        let effect = apply_inbound(
+            &settings,
+            &mut overlay,
+            &mut peers,
+            &mut replay,
+            &mut roster,
+            msg,
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20)),
+            None,
+        );
+        assert!(matches!(
+            effect,
+            InboundEffect::OverlayChanged(OverlaySnapshot::Visible(_))
+        ));
     }
 
     fn signed_roster(

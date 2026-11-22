@@ -17,6 +17,11 @@ let package = Package(
                 .linkedFramework("ApplicationServices"),
                 .linkedFramework("QuartzCore"),
             ]
+        ),
+        .testTarget(
+            name: "TapGesturesTests",
+            dependencies: ["TapGestures"],
+            path: "Tests/TapGesturesTests"
         )
     ]
 )
