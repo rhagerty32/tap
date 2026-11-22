@@ -1,187 +1,160 @@
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/cover-dark.png">
+  <img alt="Tap: the menu-bar team list, the receiver banner, and the trackpad volume panel" src="docs/readme/cover-light.png" width="100%">
+</picture>
+
 # Tap
 
-**Press and hold a teammate in the menu bar to flash a click-through glow on their screens—built for offices where people work in headphones.**
+**Press and hold a teammate in the menu bar to flash a click-through glow on their screens.**<br>
+Built for offices where people work in headphones.
 
 [![CI](https://github.com/rhagerty32/tap/actions/workflows/ci.yml/badge.svg)](https://github.com/rhagerty32/tap/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/github/license/rhagerty32/tap)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/rhagerty32/tap?color=F7A53F&label=release)](https://github.com/rhagerty32/tap/releases)
+[![License: MIT](https://img.shields.io/github/license/rhagerty32/tap?color=F86E51)](LICENSE)
+![macOS](https://img.shields.io/badge/macOS-Apple%20Silicon%20%2B%20Intel-2A211D)
+![Linux](https://img.shields.io/badge/Linux-AppImage%20%2B%20.deb-2A211D)
 
-Tap is a small cross-platform desktop app for getting a coworker's attention when they are wearing headphones. You press-and-hold a peer in the menu bar / system tray popover; while you hold, the peer's screens show a click-through glowing border and banner. Releasing stops the signal immediately.
+[Install](#install) · [Set up a team](#set-up-a-team) · [How it works](#how-it-works) · [Build](#build-from-source) · [Contributing](#contributing)
 
-Built with **Tauri v2** (Rust core + lightweight TypeScript UI).
+</div>
 
-## Screenshot
+---
 
-<!-- Replace with a GIF or screenshot when you have one (overlay + tray list). -->
-> **Placeholder:** Add something like `docs/images/tap-demo.gif` showing the receiver overlay and the tray team list.
+<table>
+<tr>
+<td width="50%" valign="top">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/card-hold-dark.png">
+  <img alt="The team list with one teammate being held" src="docs/readme/card-hold-light.png" width="100%">
+</picture>
 
-## Features
+### Press and hold
 
-- **Press-and-hold signaling** from the tray popover (pointer down/up—not a native menu item).
-- **Live receiver overlay** on every display: transparent, always-on-top, click-through, no focus steal.
-- **Peer-to-peer UDP** on LAN or Tailscale; no central server or accounts.
-- **Team discovery** via shared team key + Tailscale tailnet, with mDNS on the local network and optional manual host fallback.
-- **Signed messages** (HMAC-SHA256) with timestamp skew and nonce replay protection; optional **Tailnet only** mode (100.64.0.0/10).
-- **Keyboard shortcuts** for opening the team list and holding a teammate's assigned key (platform-specific).
-- **Trackpad edges on a Mac.** Slide an edge for volume, brightness, or the current track. Rest a finger in a corner to tap the person you bound there. The gesture engine is a Swift library inside the Mac app; Linux builds leave it out. Settings live on the Trackpad tab.
-- **No telemetry**—settings and keys stay on your machines.
+Open the popover from the menu bar or tray and hold a teammate’s row. A ring fills, the row
+lights up, and the tap runs for as long as you hold. Release to stop.
+</td>
+<td width="50%" valign="top">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/card-glow-dark.png">
+  <img alt="A display with a glowing edge and a banner reading 'Maya Reyes is tapping you'" src="docs/readme/card-glow-light.png" width="100%">
+</picture>
 
-Default UDP port: **37561**.
+### Their screens glow
 
-## How it works
+One transparent, always-on-top overlay per display. It’s click-through and never steals focus.
+Pick from six glow styles: line, edge, soft, wash, bold and corners.
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/card-pad-dark.png">
+  <img alt="The trackpad diagram with edge bands and the glass volume panel" src="docs/readme/card-pad-light.png" width="100%">
+</picture>
 
-- **Sender:** open the tray popover, press and hold a peer row (pointer down/up — not a native menu item).
-- **While holding:** UDP `start`, then `heartbeat` every ~500ms.
-- **On release:** UDP `stop`.
-- **Receiver:** one transparent, always-on-top overlay per display (click-through, no focus steal). If heartbeats stop for ~2s, the overlay clears itself.
-- **Transport:** peer-to-peer UDP on LAN or Tailscale; no central server.
-- **Discovery:** same team key on the same Tailscale tailnet. Tap says hello to each online machine and shows the ones that answer. On a local network it also uses mDNS. A typed host is only a fallback.
-- **Auth:** HMAC-SHA256 with a shared team key, timestamp skew + nonce replay protection. Optional **Tailnet only** mode (100.64.0.0/10).
+### Trackpad edges (Mac)
 
-## Keyboard
+Slide an edge for volume, brightness or the current track, and a glass level panel follows
+along. Rest a finger in a corner to tap the person you bound there. Set it up on the **Trackpad** tab.
+</td>
+<td width="50%" valign="top">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/card-p2p-dark.png">
+  <img alt="Two teammates connected directly: start, heartbeat, stop over UDP 37561" src="docs/readme/card-p2p-light.png" width="100%">
+</picture>
 
-Letter keys are not global. They only work while the team list is open.
+### Peer-to-peer and private
 
-1. Settings → Team members: focus the key box on a person and press one letter or number. Backspace clears it. Two people cannot share a key.
-2. Open the list with a shortcut, then hold a teammate's key. Releasing stops the tap. Escape closes the list.
+UDP on your LAN or Tailscale, signed with HMAC-SHA256 and protected against replays.
+No central server, no accounts, no telemetry.
+</td>
+</tr>
+</table>
 
-Tap has to be running (it is a menu-bar app).
+### Also in the box
 
-### macOS
-
-In Raycast, add the `raycast` folder in this repo as a Script Command directory. Assign **Open Tap team** a hotkey (Hyper plus whatever key you want). The script is silent: it runs `open tap://keys` and does not leave Raycast on screen. The first launch of a build registers the `tap://` link.
-
-### Linux
-
-Settings → App → **Open team list**. The first run uses **Ctrl+Alt+Shift+T**. Click it and press a new chord to change it. Backspace while it is listening clears it.
-
-On GNOME that chord is saved as a custom keyboard shortcut, which works on Wayland. On X11, Tap grabs the chord itself. On other Wayland desktops, add a shortcut in the system keyboard settings that runs:
-
-```bash
-xdg-open tap://keys
-```
-
-`linux/open-team.sh` is that same command.
+| | |
+|---|---|
+| **Keyboard** | Open the team list with a shortcut, then hold the letter or number you assigned a teammate (**Settings → Team**). Raycast script on macOS; on Linux, **Settings → App → Open team list** (default `Ctrl+Alt+Shift+T`). |
+| **Discovery** | Same team key on the same tailnet, with mDNS on the local network and a typed host as a fallback. Leave the key blank to find anyone nearby. |
+| **Tailscale only** | On by default once you set a team key. Ignores anyone outside `100.64.0.0/10`. With no key, your local network is included too. |
+| **Do not disturb** | A switch right in the popover. |
+| **Updates** | **Settings → App → Updates → Check for updates**, on release builds. |
 
 ## Install
 
 ### macOS
 
-1. Download the `.dmg` from a [GitHub Release](https://github.com/rhagerty32/tap/releases) (tag `v*`), or build locally (see below). Use the `aarch64` DMG on Apple Silicon and the `x64` DMG on an Intel Mac.
-2. Open the DMG and drag **Tap** to Applications.
-3. macOS will say the app is damaged. That dialog is Gatekeeper, and right-click → Open does not get past it. Drag Tap to Applications, then run:
+1. Download the `aarch64` (Apple Silicon) or `x64` (Intel) `.dmg` from [Releases](https://github.com/rhagerty32/tap/releases).
+2. Open it and drag **Tap** to Applications.
+3. macOS will say the app is damaged. That’s Gatekeeper; right-click → Open doesn’t help. Run:
    ```bash
    xattr -cr /Applications/Tap.app
    open /Applications/Tap.app
    ```
-4. Grant **Local Network** access when prompted (required for mDNS/UDP).
+4. Allow **Local Network** access when prompted.
 
 ### Linux (Ubuntu / GNOME)
 
-**AppImage**
-
 ```bash
+# AppImage
 chmod +x Tap_*.AppImage
 ./Tap_*.AppImage
-```
 
-**Debian package**
-
-```bash
+# Debian package
 sudo dpkg -i tap_*_amd64.deb
 sudo apt-get install -f
 ```
 
-Install tray dependencies if needed: `libayatana-appindicator3-1`, `libwebkit2gtk-4.1-0`.
+Tray dependencies, if needed: `libayatana-appindicator3-1`, `libwebkit2gtk-4.1-0`.
 
-## Team key & Tailscale setup
+## Set up a team
 
-1. Open Tap. The first launch creates a **team key** and shows it on the Peers tab. Copy that same value into **Settings → Team key** on every other machine.
-2. Set a recognizable **Display name** on each machine.
-3. Install Tailscale on each machine and log into the same tailnet. Within a few seconds, everyone running Tap with this team key shows up. You do not need their IP.
-4. **Tailscale only** is on by default, so Tap ignores people who are not on the tailnet. Turn it off to also find people on the local network, and before using **Preview on this Mac**.
+1. Open Tap and set your **Name** (and optionally a photo) on the **Profile** tab.
+2. Open **Settings → Team**. The **team key** is optional. Leave it blank to tap anyone on your local network or Tailscale, or choose the same key on every machine to keep a team private. Tap never generates one for you.
+3. Log everyone into the same Tailscale tailnet (or be on the same local network). Teammates appear within a few seconds.
+4. **Tailscale only** is on by default but only applies once a team key is set. Turn it off to also find people on the local network.
 
-Per-person **mute/allow** lists live in `~/.config/tap/settings.json` (`muteSenders` / `allowSenders` maps keyed by sender id) for v1.
+Settings tabs: **Profile**, **Glow**, **Team**, **Trackpad** (macOS only) and **App**.
 
-## Try it on this Mac
+## How it works
 
-1. Open Tap from the menu bar. The first launch opens the window for you.
-2. Press **Preview on this Mac**.
-3. The border and banner should show on your screens for a couple of seconds, then clear.
+| Step | What happens |
+|---|---|
+| Hold | Sender sends UDP `start`, then a `heartbeat` about every 500 ms |
+| Release | Sender sends `stop` and the glow fades out |
+| Silence | If heartbeats stop for about 2 s, the receiver clears the overlay on its own |
+| Port | `37561` by default. Allow it through your firewall between peers |
 
-That uses the real signed UDP path, sent to this machine. It does not check discovery between two computers.
+## Platform support
 
-## Try it on two machines
-
-1. Build or install Tap on **Machine A** and **Machine B** (same team key).
-2. On both: open tray → **Settings** → set display names, team key, matching sender color optional → Save.
-3. Wait a few seconds. Both machines need the same team key and the same tailnet.
-4. On **Machine A**, open the popover and **press-and-hold** Machine B's row.
-5. On **Machine B**, confirm the border + banner on all monitors; release on A and confirm it disappears.
-6. Test safety: kill Tap on A while holding — B's overlay should clear within ~2s.
-
-## Platform support & overlay behavior
-
-| Platform | Tray / menu bar | Receiver overlay | Notes |
-|----------|-----------------|------------------|-------|
-| **macOS** (Apple Silicon and Intel) | Menu bar + popover | Transparent always-on-top webview windows per display; `setIgnoreCursorEvents`, high window level, collection behavior for all Spaces / fullscreen auxiliary | Best-effort non-activating panel behavior via NSWindow APIs. Releases ship separate `aarch64` and `x64` DMGs. Notarization/signing when Apple secrets are configured in CI. |
-| **Linux X11** | Ayatana app indicator | Transparent always-on-top undecorated windows; `set_ignore_cursor_events(true)` | Click-through works reliably on X11 sessions. |
-| **Linux Wayland (wlroots: Sway, Hyprland, etc.)** | App indicator (via XWayland or native) | Same GTK/WebKit windows; compositor-dependent stacking | wlr-layer-shell is **not** wired in v1; behavior varies by compositor. |
-| **Ubuntu / GNOME / Mutter (Wayland)** | Supported tray | Always-on-top transparent windows + ignored cursor events | Mutter has **no** wlr-layer-shell; this is the documented fallback (not a true layer-shell overlay). Stacking above full-screen apps may be inconsistent. |
+| Platform | Tray | Overlay |
+|---|---|---|
+| macOS (Apple Silicon + Intel) | Menu bar + popover | Per-display, click-through, all Spaces and full-screen |
+| Linux X11 | Ayatana app indicator | Click-through works reliably |
+| Linux Wayland (wlroots) | App indicator | Compositor-dependent stacking; wlr-layer-shell not wired in v1 |
+| Ubuntu GNOME (Wayland) | Supported | Always-on-top fallback; may not stack above full-screen apps |
 
 ## Build from source
 
-Prerequisites: [Tauri prerequisites](https://tauri.app/start/prerequisites/), Node 22+, Rust stable (see `rust-toolchain.toml`).
+Prerequisites: [Tauri prerequisites](https://tauri.app/start/prerequisites/), Node 22+, Rust stable (pinned in `rust-toolchain.toml`).
 
 ```bash
 npm ci
-npm run tauri dev
+npm run tauri dev     # run
+npm test              # cargo test
+npm run tauri build   # bundles in src-tauri/target/release/bundle/
 ```
-
-Release bundles:
-
-```bash
-npm run tauri build
-```
-
-Artifacts land in `src-tauri/target/release/bundle/`.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for Linux packages CI uses, tests, and PR expectations.
-
-## Cut a release
-
-1. Bump `version` in `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml` so it matches the tag (`v0.1.0` for version `0.1.0`).
-2. Commit and push a tag. That is what publishes; the workflow does not run on normal pushes.
-   ```bash
-   git tag v0.1.0
-   git push origin v0.1.0
-   ```
-3. The **Release** workflow builds Apple Silicon and Intel `.dmg` files, a Linux `.AppImage`, and a `.deb`, then attaches them to the GitHub Release along with `latest.json`.
-4. Settings → **Check for updates** downloads the next version for an app installed from the `.dmg` (dragged to Applications) or for the `.AppImage`. A `.deb` install is updated by installing the new package.
-5. Before the first tag, set the repository secret `TAURI_SIGNING_PRIVATE_KEY` to the contents of `~/.tauri/tap.key`. That private key stays off the repo. Optional Apple signing: `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`.
 
 ## Contributing
 
-Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for build, test, and PR guidelines, and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community expectations.
+> **How changes land:** anyone can open a pull request against `main`. [@rhagerty32](https://github.com/rhagerty32)
+> reviews every PR and is the only person who merges to `main`. Releases are cut from tags by the maintainer.
 
-## Security notes
-
-- No telemetry, accounts, or hosted server.
-- Do not commit team keys; use Settings locally.
-- Firewall must allow UDP **37561** (or your chosen port) between peers.
-
-## Tests
-
-```bash
-npm test
-```
-
-That runs `cargo test`. The suite covers message signing, replay rejection, the 2s heartbeat timeout, and a loopback preview: signed UDP start, heartbeats, and stop drive the overlay visible, then hidden. No window and no second machine.
-
-## CI
-
-- **CI** workflow: `npm audit`, frontend build, `cargo test`, `cargo audit` (non-blocking), Tauri build on Ubuntu + macOS for PRs.
-- **Release** workflow: tagged releases only.
+Read [CONTRIBUTING.md](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md) first.
 
 ## License
 
-Tap is released under the [MIT License](LICENSE). Copyright Ryan Hagerty.
+[MIT](LICENSE) © Ryan Hagerty
